@@ -136,15 +136,11 @@ class MessageSearchFilters(BaseModel):
     unread_only: bool = Field(default=False, description="Restrict results to unread messages where supported.")
     has_attachments: bool | None = Field(default=None, description="Filter by presence of attachments.")
     limit: int | None = Field(default=None, description="Maximum number of results to return.")
-
-
-class SemanticMatch(BaseModel):
-    """Result entry returned by the semantic search tool."""
-
-    message_uri: str = Field(description="Message resource URI.")
-    score: float = Field(ge=0.0, description="Similarity score (higher is better).")
-    summary: MessageSummary = Field(description="Original message summary for convenience.")
-    highlighted_snippet: str | None = Field(default=None, description="Body snippet with optional highlighting.")
+    time_frame: str | None = Field(
+        default=None,
+        description="Optional relative timeframe label used to derive since/until when those are omitted.",
+    )
+    offset: int | None = Field(default=None, description="Number of results to skip (for pagination).")
 
 
 class ToolRuntimeDiagnostics(BaseModel):
@@ -166,3 +162,4 @@ class AttachmentContent(BaseModel):
     download_url: HttpUrl | None = Field(
         default=None, description="If available, direct download link produced by the provider."
     )
+

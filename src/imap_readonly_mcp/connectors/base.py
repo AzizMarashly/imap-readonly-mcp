@@ -24,12 +24,10 @@ class ConnectorCapabilities:
         *,
         supports_folders: bool = True,
         supports_search: bool = True,
-        supports_semantic: bool = True,
         supports_attachments: bool = True,
     ) -> None:
         self.supports_folders = supports_folders
         self.supports_search = supports_search
-        self.supports_semantic = supports_semantic
         self.supports_attachments = supports_attachments
 
 
@@ -68,3 +66,4 @@ class ReadOnlyMailConnector(ABC):
         """Optional hook allowing connectors to optimize repeated message retrieval."""
         # Default implementation does nothing. Protocol specific connectors can override.
         return None
+

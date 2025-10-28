@@ -1,35 +1,10 @@
 # Example configuration file for the read-only mail MCP server.
-accounts:
-  - id: corporate-imap
-    protocol: imap
-    description: "Corporate IMAP mailbox"
-    host: imap.example.com
-    port: 993
-    username: alice@example.com
-    password: change-me
-    default_folder: INBOX
-
-  - id: legacy-pop3
-    protocol: pop3
-    description: "Legacy POP3 mailbox (read-only)"
-    host: pop.example.com
-    port: 995
-    username: bob@example.com
-    password: change-me
-
-  - id: ms-graph
-    protocol: graph
-    description: "Microsoft 365 mailbox using Microsoft Graph"
-    oauth:
-      authority: https://login.microsoftonline.com/<tenant-id>
-      client_id: "<client-id>"
-      client_secret: "<client-secret>"
-      scopes:
-        - https://graph.microsoft.com/.default
-      user_id: user@example.com
-    default_folder: Inbox
-
-semantic_search:
-  enabled: true
-  model_name: sentence-transformers/paraphrase-multilingual-mpnet-base-v2
-  batch_size: 16
+account:
+  id: personal-imap
+  protocol: imap
+  description: "Personal IMAP mailbox"
+  host: imap.example.com
+  port: 993
+  username: user@example.com
+  password: change-me
+  default_folder: INBOX

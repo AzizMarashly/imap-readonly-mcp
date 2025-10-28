@@ -1,29 +1,16 @@
-﻿"""Pydantic models describing tool inputs for MCP tools."""
+"""Pydantic models describing tool inputs for MCP tools."""
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-def _example_account() -> str:
-    return "corporate-imap"
-
 
 def _example_folder_token() -> str:
     return "SU5CT1g="  # Base64 for "INBOX"
-
-
-class ListFoldersInput(BaseModel):
-    """Request payload for the list_folders tool."""
-
-    model_config = ConfigDict(title="List Folders Request")
-
-    account_id: str = Field(
-        description="Identifier of the configured mail account.",
-        examples=[_example_account()],
-    )
 
 
 class SearchMessagesInput(BaseModel):
@@ -34,10 +21,11 @@ class SearchMessagesInput(BaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "account_id": _example_account(),
                     "folder_token": _example_folder_token(),
+                    "time_frame": "last_7_days",
                     "text": "invoice",
                     "sender": "billing@example.com",
+                    "offset": 0,
                     "since": "2025-01-01T00:00:00Z",
                     "limit": 25,
                 }
@@ -45,10 +33,6 @@ class SearchMessagesInput(BaseModel):
         },
     )
 
-    account_id: str = Field(
-        description="Identifier of the configured mail account.",
-        examples=[_example_account()],
-    )
     folder_token: str | None = Field(
         default=None,
         description="Opaque folder token obtained from list_folders. Leave empty to use the account default.",
@@ -58,6 +42,11 @@ class SearchMessagesInput(BaseModel):
         default=None,
         description="Free-text query applied to subject, body, and address fields.",
         examples=["status update"],
+    )
+    time_frame: TimeFrameLiteral | None = Field(
+        default=None,
+        description="Optional relative timeframe. When provided, automatically sets missing since/until fields.",
+        examples=["last_7_days"],
     )
     sender: str | None = Field(
         default=None,
@@ -71,13 +60,13 @@ class SearchMessagesInput(BaseModel):
     )
     since: datetime | str | None = Field(
         default=None,
-        description="Return messages received on or after this timestamp (ISO-8601 string).",
-        examples=["2025-05-01T00:00:00Z"],
+        description='Return messages received on or after this timestamp. Accepts ISO-8601 dates or natural language (e.g. "last monday").',
+        examples=["2025-05-01T00:00:00Z", "last monday"],
     )
     until: datetime | str | None = Field(
         default=None,
-        description="Return messages received up to and including this timestamp (ISO-8601 string).",
-        examples=["2025-05-31T23:59:59Z"],
+        description='Return messages received up to and including this timestamp. Accepts ISO-8601 dates or natural language (e.g. "yesterday").',
+        examples=["2025-05-31T23:59:59Z", "yesterday"],
     )
     unread_only: bool = Field(
         default=False,
@@ -89,11 +78,17 @@ class SearchMessagesInput(BaseModel):
         description="Restrict to messages that contain attachments.",
         examples=[True],
     )
-    limit: int | None = Field(
+    offset: int | None = Field(
         default=None,
+        ge=0,
+        description="Number of results to skip (use with limit for pagination).",
+        examples=[20],
+    )
+    limit: int | None = Field(
+        default=20,
         ge=1,
         le=500,
-        description="Maximum number of results to return (defaults to server limit).",
+        description="Maximum number of results to return for this page (defaults to 20, capped by server).",
         examples=[50],
     )
 
@@ -110,10 +105,6 @@ class GetMessageInput(BaseModel):
 
     model_config = ConfigDict(title="Get Message Request")
 
-    account_id: str = Field(
-        description="Identifier of the configured mail account.",
-        examples=[_example_account()],
-    )
     folder_token: str = Field(
         description="Opaque folder token from list_folders.",
         examples=[_example_folder_token()],
@@ -129,10 +120,6 @@ class GetAttachmentInput(BaseModel):
 
     model_config = ConfigDict(title="Get Attachment Request")
 
-    account_id: str = Field(
-        description="Identifier of the configured mail account.",
-        examples=[_example_account()],
-    )
     folder_token: str = Field(
         description="Opaque folder token from list_folders.",
         examples=[_example_folder_token()],
@@ -147,28 +134,11 @@ class GetAttachmentInput(BaseModel):
     )
 
 
-class SemanticSearchInput(BaseModel):
-    """Arguments for semantic search across indexed mail."""
+TimeFrameLiteral = Literal[
+    "last_hour",
+    "last_24_hours",
+    "last_7_days",
+    "last_30_days",
+    "last_90_days",
+]
 
-    model_config = ConfigDict(title="Semantic Search Request")
-
-    account_id: str = Field(
-        description="Identifier of the configured mail account.",
-        examples=[_example_account()],
-    )
-    query: str = Field(
-        description="Natural language search query.",
-        examples=["multilingual invoice status"],
-    )
-    folder_token: str | None = Field(
-        default=None,
-        description="Optional folder token. Search all indexed folders when omitted.",
-        examples=[_example_folder_token()],
-    )
-    top_k: int = Field(
-        default=5,
-        gt=0,
-        le=25,
-        description="Maximum number of semantic matches to return.",
-        examples=[5],
-    )

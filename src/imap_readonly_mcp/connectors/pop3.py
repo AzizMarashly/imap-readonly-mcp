@@ -77,12 +77,17 @@ class POP3ReadOnlyConnector(ReadOnlyMailConnector):
 
     def search_messages(self, filters: MessageSearchFilters) -> list[MessageSummary]:
         limit = filters.limit or 50
+        offset = filters.offset or 0
         summaries: list[MessageSummary] = []
         with self._connection() as conn:
             stat = conn.stat()
             message_count = stat[0]
-            start = max(message_count - limit + 1, 1)
-            for index in range(message_count, start - 1, -1):
+            indices = list(range(message_count, 0, -1))
+            if offset:
+                indices = indices[offset:]
+            if limit is not None:
+                indices = indices[:limit]
+            for index in indices:
                 raw = self._retrieve_message(conn, index)
                 message = parse_rfc822_message(raw)
                 summary = create_summary_from_message(
@@ -177,3 +182,4 @@ def _collect_headers(message):
     for key, value in message.items():
         headers.setdefault(key, []).append(value)
     return headers
+

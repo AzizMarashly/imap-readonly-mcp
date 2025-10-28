@@ -20,5 +20,3 @@ class AttachmentNotFoundError(MailServiceError):
     """Raised when an attachment cannot be located for a message."""
 
 
-class SemanticSearchUnavailableError(MailServiceError):
-    """Raised when semantic search has been requested but is not available."""

@@ -67,29 +67,6 @@ class OAuth2Config(BaseModel):
         return self
 
 
-class SemanticSearchConfig(BaseModel):
-    """Configuration for semantic search indexing."""
-
-    enabled: bool = Field(default=True, description="Whether semantic search indexing is enabled.")
-    model_name: str = Field(
-        default="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
-        description="SentenceTransformers model to use for embeddings.",
-    )
-    batch_size: int = Field(
-        default=16,
-        ge=1,
-        le=256,
-        description="Batch size used when encoding message bodies for semantic indexing.",
-    )
-    cache_dir: Path | None = Field(
-        default=None,
-        description="Optional path where embedding models should be cached. Defaults to HuggingFace cache directory.",
-    )
-    auto_index_on_fetch: bool = Field(
-        default=True,
-        description="Automatically add messages to the semantic index when they are retrieved.",
-    )
-
 
 class AccountRateLimit(BaseModel):
     """Simple rate limiting configuration for connectors that require throttling."""
@@ -200,12 +177,9 @@ class MailSettings(BaseSettings):
         extra="ignore",
     )
 
-    accounts: list[MailAccountConfig] = Field(default_factory=list, description="Accounts exposed by the server.")
+    account: MailAccountConfig = Field(description="Single account exposed by the server.")
     default_search_limit: int = Field(default=50, gt=0, description="Default limit applied to message search results.")
     maximum_search_limit: int = Field(default=200, gt=0, description="Hard limit to protect accidental large searches.")
-    semantic_search: SemanticSearchConfig = Field(
-        default_factory=SemanticSearchConfig, description="Semantic search configuration."
-    )
     connection_retries: int = Field(
         default=3, ge=0, le=10, description="Number of times the server will retry failed connector operations."
     )
@@ -215,18 +189,6 @@ class MailSettings(BaseSettings):
         description="Resolved path used to load configuration (for diagnostics).",
         exclude=True,
     )
-
-    @model_validator(mode="after")
-    def _validate_accounts(self) -> "MailSettings":
-        account_ids = set()
-        for account in self.accounts:
-            if account.id in account_ids:
-                raise ConfigurationError(f"Duplicate account id detected: {account.id}")
-            account_ids.add(account.id)
-        if not self.accounts:
-            raise ConfigurationError("At least one mail account must be configured.")
-        return self
-
 
 def load_settings(config_path: Path | None = None, overrides: dict[str, Any] | None = None) -> MailSettings:
     """Load configuration from YAML/JSON on disk combined with environment overrides."""
@@ -244,6 +206,14 @@ def load_settings(config_path: Path | None = None, overrides: dict[str, Any] | N
             raise ConfigurationError(f"Unable to parse configuration file {resolved_path}: {exc}") from exc
     if overrides:
         base_data.update(overrides)
+
+    if "account" not in base_data:
+        legacy_accounts = base_data.get("accounts")
+        if legacy_accounts:
+            base_data["account"] = legacy_accounts[0]
+        else:
+            raise ConfigurationError("Configuration must specify 'account'.")
+    base_data.pop("accounts", None)
 
     settings = MailSettings.model_validate(base_data)
     settings.config_path = resolved_path

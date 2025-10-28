@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import imaplib
 import re
@@ -43,11 +44,72 @@ _SIZE_PATTERN = re.compile(r"RFC822\.SIZE (\d+)")
 
 
 def _encode_mailbox(value: str) -> str:
-    return value.encode("imap4-utf-7").decode("ascii")
+    if hasattr(imaplib.IMAP4, "_encode_utf7"):
+        return imaplib.IMAP4._encode_utf7(value)  # type: ignore[attr-defined]
+
+    res: list[str] = []
+    buffer: list[str] = []
+
+    def flush() -> None:
+        if not buffer:
+            return
+        raw = "".join(buffer).encode("utf-16-be")
+        encoded = base64.b64encode(raw).decode("ascii").replace("/", ",").rstrip("=")
+        res.append(f"&{encoded}-")
+        buffer.clear()
+
+    for ch in value:
+        if 0x20 <= ord(ch) <= 0x7E:
+            flush()
+            if ch == "&":
+                res.append("&-")
+            else:
+                res.append(ch)
+        else:
+            buffer.append(ch)
+    flush()
+    return "".join(res)
 
 
 def _decode_mailbox(value: str) -> str:
-    return value.encode("ascii").decode("imap4-utf-7")
+    if hasattr(imaplib.IMAP4, "_decode_utf7"):
+        return imaplib.IMAP4._decode_utf7(value)  # type: ignore[attr-defined]
+
+    result: list[str] = []
+    i = 0
+    while i < len(value):
+        ch = value[i]
+        if ch != "&":
+            result.append(ch)
+            i += 1
+            continue
+
+        j = i + 1
+        while j < len(value) and value[j] != "-":
+            j += 1
+        if j == len(value):
+            raise ValueError("Invalid modified UTF-7 sequence")
+        segment = value[i + 1 : j]
+        if not segment:
+            result.append("&")
+            i = j + 1
+            continue
+        segment = segment.replace(",", "/")
+        padding = (-len(segment)) % 4
+        segment += "=" * padding
+        decoded = base64.b64decode(segment).decode("utf-16-be")
+        result.append(decoded)
+        i = j + 1
+    return "".join(result)
+
+
+def _build_preview(content: bytes, max_lines: int = 19) -> str | None:
+    if not content:
+        return None
+    text = content.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.splitlines()
+    preview = "\n".join(lines[:max_lines]).strip()
+    return preview or None
 
 
 class IMAPReadOnlyConnector(ReadOnlyMailConnector):
@@ -119,16 +181,22 @@ class IMAPReadOnlyConnector(ReadOnlyMailConnector):
     def search_messages(self, filters: MessageSearchFilters) -> list[MessageSummary]:
         folder = filters.folder or self.config.default_folder or "INBOX"
         uids = self._search_uids(folder, filters)
-        summaries: list[MessageSummary] = []
+        offset = filters.offset or 0
         limit = filters.limit
+        if offset:
+            uids = uids[offset:]
         if limit is not None:
             uids = uids[:limit]
-        for uid in uids:
-            try:
-                detail = self.fetch_message(folder, uid)
-            except MessageNotFoundError:
-                continue
-            summaries.append(MessageSummary.model_validate(detail.model_dump()))
+
+        summaries: list[MessageSummary] = []
+        with self._connection() as conn:
+            self._select_mailbox(conn, folder)
+            for uid in uids:
+                try:
+                    summary = self._fetch_summary(conn, folder, uid)
+                except MessageNotFoundError:
+                    continue
+                summaries.append(summary)
         return summaries
 
     def fetch_message(self, folder_path: str, uid: str) -> MessageDetail:
@@ -155,13 +223,13 @@ class IMAPReadOnlyConnector(ReadOnlyMailConnector):
                 folder_path=folder_path,
                 uid=uid,
             )
+            summary.size = resp.get("size")
             detail = MessageDetail(
                 **summary.model_dump(),
                 body=body,
                 attachments=attachments,
                 headers=_collect_headers(message),
                 raw_source=raw_bytes.decode("utf-8", errors="replace"),
-                size=resp.get("size"),
             )
             return detail
 
@@ -193,6 +261,43 @@ class IMAPReadOnlyConnector(ReadOnlyMailConnector):
                 file_name=metadata.filename,
                 download_url=None,
             )
+
+    def _fetch_summary(self, conn: imaplib.IMAP4, folder_path: str, uid: str) -> MessageSummary:
+        typ, data = conn.uid("FETCH", uid, "(BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.4096> FLAGS RFC822.SIZE UID)")
+        if typ != "OK" or not data:
+            raise MessageNotFoundError(f"Unable to fetch summary for UID {uid}")
+        header_bytes: bytes | None = None
+        flags = MessageFlags()
+        size = None
+        snippet_bytes = b""
+        for item in data:
+            if not isinstance(item, tuple):
+                continue
+            meta = item[0].decode("utf-8", errors="replace")
+            content = item[1]
+            if content and "BODY[HEADER" in meta:
+                header_bytes = content
+            elif content and "BODY[TEXT" in meta:
+                snippet_bytes += content
+            flags = _parse_flags(meta)
+            if size is None:
+                size = _parse_size(meta)
+        if header_bytes is None:
+            raise MessageNotFoundError(f"Unable to fetch header for UID {uid}")
+        message = parse_rfc822_message(header_bytes)
+        preview = _build_preview(snippet_bytes)
+        summary = create_summary_from_message(
+            account_id=self.config.id,
+            folder_path=folder_path,
+            uid=uid,
+            message=message,
+            snippet=preview,
+            flags=flags,
+        )
+        summary.size = size
+        if preview:
+            summary.snippet = preview
+        return summary
 
     def _select_mailbox(self, conn: imaplib.IMAP4, folder_path: str) -> None:
         encoded = _encode_mailbox(folder_path)
@@ -310,3 +415,5 @@ def _infer_mailbox_role(name: str) -> MailboxRole:
     if "archive" in lowered:
         return MailboxRole.ARCHIVE
     return MailboxRole.CUSTOM
+
+

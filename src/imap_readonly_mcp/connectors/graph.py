@@ -292,7 +292,7 @@ def _build_messages_url(base: str, resource_path: str, folder: str | None) -> st
 
 def _build_query_params(filters: MessageSearchFilters) -> dict[str, str]:
     params: dict[str, str] = {
-        "$top": str(min(filters.limit or 50, 200)),
+        "$top": str(min(filters.limit or 20, 200)),
         "$orderby": "receivedDateTime desc",
         "$select": ",".join(
             [
@@ -334,6 +334,9 @@ def _build_query_params(filters: MessageSearchFilters) -> dict[str, str]:
         filter_clauses.append(f"receivedDateTime le {filters.until.isoformat()}")
     if filter_clauses:
         params["$filter"] = " and ".join(filter_clauses)
+
+    if filters.offset:
+        params["$skip"] = str(filters.offset)
 
     return params
 
@@ -385,3 +388,4 @@ def _infer_folder_role(display_name: str) -> MailboxRole:
     if "archive" in lowered:
         return MailboxRole.ARCHIVE
     return MailboxRole.CUSTOM
+

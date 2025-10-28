@@ -41,6 +41,18 @@ docker run --rm \
   --config /app/config/accounts.yaml
 ```
 
+### Streamable HTTP Transport
+
+```bash
+FASTMCP_TRANSPORT=streamable-http \
+FASTMCP_HOST=0.0.0.0 \
+FASTMCP_PORT=8765 \
+FASTMCP_STREAMABLE_HTTP__PATH=/mcp \
+imap-readonly-mcp --config config/accounts.yaml --transport streamable-http
+```
+
+The server prints the bound address (for example `http://127.0.0.1:8765/mcp`). Clients must follow the MCP Streamable HTTP handshake and include `Accept: application/json, text/event-stream` when initiating a session.
+
 ## Configuration
 
 Configuration lives in YAML (defaults to `config/accounts.yaml`). See `config/accounts.example.yaml` for a complete template.

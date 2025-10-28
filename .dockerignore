@@ -1,0 +1,11 @@
+__pycache__
+*.pyc
+.git
+.github
+.vscode
+.venv
+build
+dist
+.coverage
+pytest.xml
+*.log

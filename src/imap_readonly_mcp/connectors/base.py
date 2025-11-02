@@ -50,6 +50,10 @@ class ReadOnlyMailConnector(ABC):
     def search_messages(self, filters: MessageSearchFilters) -> list[MessageSummary]:
         """Search for messages that match the provided filters."""
 
+    def search_all_folders(self, filters: MessageSearchFilters) -> list[MessageSummary]:
+        """Search for messages across all folders (default falls back to single-folder search)."""
+        return self.search_messages(filters)
+
     @abstractmethod
     def fetch_message(self, folder_path: str, uid: str) -> MessageDetail:
         """Return full message details."""

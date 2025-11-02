@@ -55,6 +55,8 @@ class MailService:
     def search_messages(self, filters: MessageSearchFilters) -> list[MessageSummary]:
         connector = self._get_connector()
         normalized_filters = self._normalize_filters(filters)
+        if normalized_filters.folder is None:
+            return self._search_all_folders(connector, normalized_filters)
         return connector.search_messages(normalized_filters)
 
     def fetch_message(self, folder_token: str, uid: str) -> MessageDetail:
@@ -122,6 +124,69 @@ class MailService:
             time_frame=None,
             offset=offset,
         )
+
+    def _search_all_folders(
+        self,
+        connector: ReadOnlyMailConnector,
+        filters: MessageSearchFilters,
+    ) -> list[MessageSummary]:
+        if not connector.capabilities.supports_folders:
+            return connector.search_messages(filters)
+
+        folders = [
+            folder.path for folder in self.list_folders() if folder.selectable
+        ]
+        if not folders:
+            return []
+
+        default_folder = self.settings.account.default_folder
+        if default_folder and default_folder in folders:
+            folders.remove(default_folder)
+            folders.insert(0, default_folder)
+
+        offset = filters.offset or 0
+        limit = filters.limit or self.settings.default_search_limit
+        if limit <= 0:
+            return []
+
+        remaining_budget = limit + offset
+        summaries: list[MessageSummary] = []
+
+        for folder_path in folders:
+            if remaining_budget <= 0:
+                break
+            per_folder_limit = min(remaining_budget, self.settings.maximum_search_limit)
+            adjusted_filters = filters.model_copy(
+                update={
+                    "folder": folder_path,
+                    "offset": 0,
+                    "limit": per_folder_limit,
+                }
+            )
+            folder_summaries = connector.search_messages(adjusted_filters)
+            if not folder_summaries:
+                continue
+            summaries.extend(folder_summaries)
+            remaining_budget = max(remaining_budget - len(folder_summaries), 0)
+
+        if not summaries:
+            return []
+
+        def _sort_key(summary: MessageSummary) -> datetime:
+            dt = summary.date
+            if dt is None:
+                return datetime.min.replace(tzinfo=timezone.utc)
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
+        summaries.sort(key=_sort_key, reverse=True)
+
+        if offset:
+            summaries = summaries[offset:]
+        if limit:
+            summaries = summaries[:limit]
+        return summaries
 
 
 def _ensure_datetime(value: datetime | str | None) -> datetime | None:

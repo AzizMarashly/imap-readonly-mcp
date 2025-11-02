@@ -23,6 +23,7 @@ from .tooling import (
     MailContact,
     MailDownloadAttachmentInput,
     MailDownloadAttachmentResult,
+    MailFetchError,
     MailFetchInput,
     MailFetchResult,
     MailMessageItem,
@@ -241,6 +242,7 @@ def create_server(settings: MailSettings) -> FastMCP:
             "Typical flows: list newest (`folder=\"INBOX\"`), continue paging (`cursor=next_cursor`), "
             "catch up (`cursor=sync_cursor`), read fully (`ids=[...]`, include=\"full\", include_attachments=\"meta\")."
         ),
+        structured_output=True,
     )
     async def mail_fetch(
         ids: Annotated[
@@ -312,7 +314,7 @@ def create_server(settings: MailSettings) -> FastMCP:
             Literal["none", "meta", "inline"],
             Field(default="none", description='`none`, `meta`, or `inline` (small base64 payloads).'),
         ] = "none",
-    ) -> dict[str, Any]:
+    ) -> MailFetchResult:
         payload = MailFetchInput(
             ids=ids,
             query=query,
@@ -328,13 +330,13 @@ def create_server(settings: MailSettings) -> FastMCP:
         try:
             effective, cursor_state = _merge_cursor(payload)
         except ValueError as exc:
-            return {"error": str(exc)}
+            return MailFetchResult(items=[], next_cursor=None, sync_cursor=None, errors=[MailFetchError(error=str(exc))])
 
         include_mode = (effective.get("include") or "headers").lower()
         attachments_mode = (effective.get("include_attachments") or "none").lower()
         expand_threads = bool(effective.get("expand_thread"))
 
-        errors: list[dict[str, str]] = []
+        errors: list[MailFetchError] = []
 
         explicit_ids = effective.get("ids") or []
         if explicit_ids:
@@ -343,20 +345,20 @@ def create_server(settings: MailSettings) -> FastMCP:
                 try:
                     account_id, folder_token, uid = _parse_message_id(message_id)
                 except ValueError as exc:
-                    errors.append({"id": message_id, "error": str(exc)})
+                    errors.append(MailFetchError(id=message_id, error=str(exc)))
                     continue
                 if account_id != settings.account.id:
                     errors.append(
-                        {
-                            "id": message_id,
-                            "error": f"message_id belongs to account '{account_id}', expected '{settings.account.id}'",
-                        }
+                        MailFetchError(
+                            id=message_id,
+                            error=f"message_id belongs to account '{account_id}', expected '{settings.account.id}'",
+                        )
                     )
                     continue
                 try:
                     detail = await _run(service.fetch_message, folder_token, uid)
                 except MessageNotFoundError as exc:
-                    errors.append({"id": message_id, "error": str(exc)})
+                    errors.append(MailFetchError(id=message_id, error=str(exc)))
                     continue
                 attachments_payload = await _render_attachments(detail, attachments_mode)
                 item, _ = _build_message_item(
@@ -374,7 +376,7 @@ def create_server(settings: MailSettings) -> FastMCP:
                 sync_cursor=None,
                 errors=errors or None,
             )
-            return result.model_dump(exclude_none=True, by_alias=True)
+            return result
 
         folder_input = effective.get("folder")
         resolved_folder = _resolve_folder_input(folder_input)
@@ -417,7 +419,7 @@ def create_server(settings: MailSettings) -> FastMCP:
                 try:
                     detail = await _run(service.fetch_message, summary.folder_token, summary.uid)
                 except MessageNotFoundError as exc:
-                    errors.append({"id": summary.resource_uri, "error": str(exc)})
+                    errors.append(MailFetchError(id=summary.resource_uri, error=str(exc)))
                     continue
             attachments_payload: list[MailAttachment] = []
             if attachments_mode != "none":
@@ -425,7 +427,7 @@ def create_server(settings: MailSettings) -> FastMCP:
                     try:
                         detail = await _run(service.fetch_message, summary.folder_token, summary.uid)
                     except MessageNotFoundError as exc:
-                        errors.append({"id": summary.resource_uri, "error": str(exc)})
+                        errors.append(MailFetchError(id=summary.resource_uri, error=str(exc)))
                         continue
                 attachments_payload = await _render_attachments(detail, attachments_mode)
             item, message_dt = _build_message_item(
@@ -478,7 +480,7 @@ def create_server(settings: MailSettings) -> FastMCP:
             sync_cursor=sync_cursor,
             errors=errors or None,
         )
-        return result.model_dump(exclude_none=True, by_alias=True)
+        return result
 
     @mcp.tool(
         name="mail.download_attachment",
@@ -487,39 +489,35 @@ def create_server(settings: MailSettings) -> FastMCP:
             "Accepts provider ids or positional indices and returns base64-encoded bytes plus filename, size, mime type, "
             "and any direct download URL."
         ),
+        structured_output=True,
     )
     async def mail_download_attachment(
         message_id: Annotated[str, Field(description="Message identifier from mail.fetch (`id` field).")],
         attachment_id: Annotated[str | int, Field(description="Attachment identifier (string id or positional index).")],
-    ) -> dict[str, Any]:
+    ) -> MailDownloadAttachmentResult:
         payload = MailDownloadAttachmentInput(message_id=message_id, attachment_id=attachment_id)
         try:
             account_id, folder_token, uid = _parse_message_id(payload.message_id)
         except ValueError as exc:
-            return {"error": str(exc)}
+            raise ValueError(str(exc)) from exc
         if account_id != settings.account.id:
-            return {
-                "error": f"message_id belongs to account '{account_id}', expected '{settings.account.id}'",
-            }
+            raise ValueError(f"message_id belongs to account '{account_id}', expected '{settings.account.id}'")
         identifier: int | str = payload.attachment_id
         if isinstance(identifier, str) and identifier.isdigit():
             identifier = int(identifier)
-        try:
-            attachment = await _run(
-                service.fetch_attachment,
-                folder_token,
-                uid,
-                identifier,
-            )
-        except (AttachmentNotFoundError, MessageNotFoundError) as exc:
-            return {"error": str(exc)}
+        attachment = await _run(
+            service.fetch_attachment,
+            folder_token,
+            uid,
+            identifier,
+        )
 
         attachment_payload = _serialise_attachment(attachment)
         result = MailDownloadAttachmentResult(
             message_id=payload.message_id,
             attachment=attachment_payload,
         )
-        return result.model_dump(exclude_none=True, by_alias=True)
+        return result
 
     @mcp.resource(
         "mail://{account_id}/{folder_token}/{uid}",

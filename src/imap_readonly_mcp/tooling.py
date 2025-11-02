@@ -1,4 +1,4 @@
-"""Pydantic models describing tool inputs for MCP tools."""
+"""Pydantic models describing tool inputs and outputs for MCP tools."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def _nullable_string_field(*, description: str, examples: list[str] | None = None) -> Any:
+    """Helper to declare nullable string fields with custom schema metadata."""
     return Field(
         default=None,
         description=description,
@@ -17,6 +18,7 @@ def _nullable_string_field(*, description: str, examples: list[str] | None = Non
 
 
 def _nullable_string_list_field(*, description: str) -> Any:
+    """Helper to declare nullable list[string] fields with schema metadata."""
     return Field(
         default=None,
         description=description,
@@ -111,12 +113,37 @@ class MailFetchInput(BaseModel):
 class MailContact(BaseModel):
     """Simple representation of a mailbox participant."""
 
+    model_config = ConfigDict(
+        title="Mail Contact",
+        json_schema_extra={
+            "examples": [
+                {"name": "Alice Example", "email": "alice@example.com"},
+                {"email": "notifications@example.com"},
+            ]
+        },
+    )
+
     name: str | None = Field(default=None, description="Display name when present.")
     email: str = Field(description="Email address.")
 
 
 class MailAttachment(BaseModel):
     """Attachment payload returned by mail.fetch or mail.download_attachment."""
+
+    model_config = ConfigDict(
+        title="Mail Attachment",
+        json_schema_extra={
+            "examples": [
+                {
+                    "id": "att-001",
+                    "filename": "invoice.pdf",
+                    "size": 23456,
+                    "mime": "application/pdf",
+                    "download_url": "mail+attachment://primary/SU5CT1g=/12345/att-001",
+                }
+            ]
+        },
+    )
 
     id: str | None = Field(default=None, description="Attachment identifier.")
     filename: str | None = Field(default=None, description="Filename where provided.")
@@ -146,6 +173,42 @@ class MailAttachment(BaseModel):
 
 class MailMessageItem(BaseModel):
     """Structured representation of a fetched email."""
+
+    model_config = ConfigDict(
+        title="Mail Message",
+        populate_by_name=True,
+        serialize_by_alias=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "id": "mail://primary/SU5CT1g=/12345",
+                    "thread_id": "t-42",
+                    "account_id": "primary",
+                    "folder": "INBOX",
+                    "folder_token": "SU5CT1g=",
+                    "uid": "12345",
+                    "resource_uri": "mail://primary/SU5CT1g=/12345",
+                    "raw_resource_uri": "mail+raw://primary/SU5CT1g=/12345",
+                    "date": "2025-11-01T09:12:03Z",
+                    "from": [{"name": "Alice", "email": "alice@example.com"}],
+                    "to": [{"name": "You", "email": "you@example.com"}],
+                    "subject": "Invoice",
+                    "is_read": False,
+                    "snippet": "Hi, attaching the invoice…",
+                    "has_attachments": True,
+                    "attachments": [
+                        {
+                            "id": "att-001",
+                            "filename": "inv.pdf",
+                            "size": 23456,
+                            "mime": "application/pdf",
+                            "download_url": "mail+attachment://primary/SU5CT1g=/12345/att-001",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
 
     id: str = Field(description="Unique resource identifier for the message.")
     thread_id: str | None = Field(default=None, description="Provider-specific thread/conversation identifier.")
@@ -189,8 +252,70 @@ class MailMessageItem(BaseModel):
     )
 
 
+class MailFetchError(BaseModel):
+    """Error detail entry returned alongside mail.fetch results."""
+
+    model_config = ConfigDict(
+        title="Mail Fetch Error",
+        json_schema_extra={
+            "examples": [
+                {"id": "mail://primary/SU5CT1g=/99999", "error": "Message not found"},
+                {"error": "Unsupported message_id format; expected mail://account/folder_token/uid"},
+            ]
+        },
+    )
+
+    id: str | None = Field(
+        default=None,
+        description="Message identifier related to the error if available.",
+        json_schema_extra={"type": "string", "nullable": True},
+    )
+    error: str = Field(description="Human-readable description of the failure.")
+
+
 class MailFetchResult(BaseModel):
     """Response envelope returned by mail.fetch."""
+
+    model_config = ConfigDict(
+        title="mail.fetch response",
+        serialize_by_alias=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "items": [
+                        {
+                            "id": "mail://primary/SU5CT1g=/12345",
+                            "thread_id": "t-42",
+                            "account_id": "primary",
+                            "folder": "INBOX",
+                            "folder_token": "SU5CT1g=",
+                            "uid": "12345",
+                            "resource_uri": "mail://primary/SU5CT1g=/12345",
+                            "raw_resource_uri": "mail+raw://primary/SU5CT1g=/12345",
+                            "date": "2025-11-01T09:12:03Z",
+                            "from": [{"name": "Alice", "email": "alice@example.com"}],
+                            "to": [{"name": "You", "email": "you@example.com"}],
+                            "subject": "Invoice",
+                            "is_read": False,
+                            "snippet": "Hi, attaching the invoice…",
+                            "has_attachments": True,
+                            "attachments": [
+                                {
+                                    "id": "att-001",
+                                    "filename": "inv.pdf",
+                                    "size": 23456,
+                                    "mime": "application/pdf",
+                                    "download_url": "mail+attachment://primary/SU5CT1g=/12345/att-001",
+                                }
+                            ],
+                        }
+                    ],
+                    "next_cursor": "pg:eyJwYWdlIjoyfQ==",
+                    "sync_cursor": "sync:eyJsYXN0X3VpZCI6MTIzfQ==",
+                }
+            ]
+        },
+    )
 
     items: list[MailMessageItem] = Field(default_factory=list, description="Fetched message entries.")
     next_cursor: str | None = _nullable_string_field(
@@ -199,7 +324,7 @@ class MailFetchResult(BaseModel):
     sync_cursor: str | None = _nullable_string_field(
         description="Cursor for incremental sync (pass back later to fetch only new/updated messages)."
     )
-    errors: list[dict[str, str]] | None = Field(
+    errors: list[MailFetchError] | None = Field(
         default=None,
         description="Optional collection of per-item errors (e.g. invalid ids).",
     )
@@ -233,9 +358,30 @@ class MailDownloadAttachmentInput(BaseModel):
 class MailDownloadAttachmentResult(BaseModel):
     """Response payload for mail.download_attachment."""
 
+    model_config = ConfigDict(
+        title="mail.download_attachment response",
+        serialize_by_alias=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "message_id": "mail://primary/SU5CT1g=/12345",
+                    "attachment": {
+                        "id": "att-001",
+                        "filename": "inv.pdf",
+                        "size": 23456,
+                        "mime": "application/pdf",
+                        "download_url": "mail+attachment://primary/SU5CT1g=/12345/att-001",
+                        "data_base64": "<base64>",
+                        "inline_bytes": 23456,
+                    },
+                }
+            ]
+        },
+    )
+
     message_id: str = Field(description="Source message identifier (echo of the request).")
     attachment: MailAttachment = Field(description="Attachment metadata and payload data.")
 
 
-# Resolve forward references
+# Resolve forward references for recursive models
 MailMessageItem.model_rebuild()

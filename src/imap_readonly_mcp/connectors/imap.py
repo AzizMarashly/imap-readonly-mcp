@@ -8,7 +8,7 @@ import imaplib
 import re
 import socket
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timezone
 from email.message import Message
 from typing import Any
 
@@ -123,7 +123,6 @@ class IMAPReadOnlyConnector(ReadOnlyMailConnector):
         return ConnectorCapabilities(
             supports_folders=True,
             supports_search=True,
-            supports_semantic=True,
             supports_attachments=True,
         )
 
@@ -197,6 +196,63 @@ class IMAPReadOnlyConnector(ReadOnlyMailConnector):
                 except MessageNotFoundError:
                     continue
                 summaries.append(summary)
+        return summaries
+
+    def search_all_folders(self, filters: MessageSearchFilters) -> list[MessageSummary]:
+        folders = [
+            folder.path
+            for folder in self.list_folders()
+            if folder.selectable
+        ]
+        if not folders:
+            return []
+
+        default_folder = self.config.default_folder
+        if default_folder and default_folder in folders:
+            folders.remove(default_folder)
+            folders.insert(0, default_folder)
+
+        offset = filters.offset or 0
+        limit = filters.limit or 0
+        if limit <= 0:
+            return []
+        remaining_budget = limit + offset
+        summaries: list[MessageSummary] = []
+
+        for folder_path in folders:
+            if remaining_budget <= 0:
+                break
+            per_folder_limit = min(remaining_budget, limit)
+            adjusted_filters = filters.model_copy(
+                update={
+                    "folder": folder_path,
+                    "offset": 0,
+                    "limit": per_folder_limit,
+                }
+            )
+            folder_summaries = self.search_messages(adjusted_filters)
+            if not folder_summaries:
+                continue
+            summaries.extend(folder_summaries)
+            remaining_budget = max(remaining_budget - len(folder_summaries), 0)
+
+        if not summaries:
+            return []
+
+        def _sort_key(summary: MessageSummary) -> datetime:
+            dt = summary.date
+            if dt is None:
+                return datetime.min.replace(tzinfo=timezone.utc)
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
+        summaries.sort(key=_sort_key, reverse=True)
+
+        if offset:
+            summaries = summaries[offset:]
+        if limit:
+            summaries = summaries[:limit]
         return summaries
 
     def fetch_message(self, folder_path: str, uid: str) -> MessageDetail:

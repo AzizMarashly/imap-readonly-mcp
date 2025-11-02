@@ -39,7 +39,6 @@ class POP3ReadOnlyConnector(ReadOnlyMailConnector):
         return ConnectorCapabilities(
             supports_folders=False,
             supports_search=True,
-            supports_semantic=True,
             supports_attachments=True,
         )
 

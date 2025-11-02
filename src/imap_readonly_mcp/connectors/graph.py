@@ -54,7 +54,6 @@ class GraphReadOnlyConnector(ReadOnlyMailConnector):
         return ConnectorCapabilities(
             supports_folders=True,
             supports_search=True,
-            supports_semantic=True,
             supports_attachments=True,
         )
 

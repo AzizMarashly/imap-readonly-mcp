@@ -12,6 +12,7 @@ from typing import Any, Annotated, Iterable, Literal
 
 import anyio
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.utilities.logging import get_logger
 from pydantic import Field
 
 from .config import MailSettings, load_settings
@@ -30,6 +31,7 @@ from .tooling import (
 )
 from .utils.identifiers import decode_folder_token
 
+logger = get_logger(__name__)
 
 def create_server(settings: MailSettings) -> FastMCP:
     """Create a configured FastMCP application instance."""
@@ -42,6 +44,22 @@ def create_server(settings: MailSettings) -> FastMCP:
     streamable_path = os.environ.get("FASTMCP_STREAMABLE_HTTP__PATH", "/mcp")
     mount_path = os.environ.get("FASTMCP_MOUNT_PATH", "/")
 
+    requested_log_level = os.environ.get("FASTMCP_LOG_LEVEL", "INFO").upper()
+    allowed_log_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    if requested_log_level == "TRACE":
+        print("[imap-readonly-mcp] TRACE is not supported; using DEBUG instead for verbose logging.", flush=True)
+        log_level = "DEBUG"
+    elif requested_log_level not in allowed_log_levels:
+        print(
+            f"[imap-readonly-mcp] Unsupported FASTMCP_LOG_LEVEL '{requested_log_level}'. "
+            "Falling back to INFO. Valid values: DEBUG, INFO, WARNING, ERROR, CRITICAL.",
+            flush=True,
+        )
+        log_level = "INFO"
+    else:
+        log_level = requested_log_level
+    debug = os.environ.get("FASTMCP_DEBUG", "false").lower() in ("1", "true", "yes", "on")
+
     mcp = FastMCP(
         "imap-readonly-mail",
         host=host,
@@ -50,6 +68,8 @@ def create_server(settings: MailSettings) -> FastMCP:
         message_path=message_path,
         streamable_http_path=streamable_path,
         mount_path=mount_path,
+        log_level=log_level,  # type: ignore[arg-type]
+        debug=debug,
     )
 
     async def _run(func, *args, **kwargs):
@@ -123,17 +143,31 @@ def create_server(settings: MailSettings) -> FastMCP:
                 effective["since"] = cursor_since
         return effective, cursor_data
 
-    def _parse_message_id(message_id: str) -> tuple[str, str, str]:
+    def _parse_message_id(message_id: str) -> tuple[str, str]:
         if not message_id.startswith("mail://"):
-            raise ValueError("Unsupported message_id format; expected mail://account/folder_token/uid")
+            raise ValueError("Unsupported message_id format; expected mail://{folder_token}/{uid}")
         without_scheme = message_id.split("://", 1)[1]
-        parts = without_scheme.split("/")
-        if len(parts) < 3:
+        folder_token, sep, uid = without_scheme.partition("/")
+        if not sep or not folder_token or not uid:
             raise ValueError("message_id is missing folder token or uid components")
-        account_id = parts[0]
-        folder_token = parts[1]
-        uid = "/".join(parts[2:])
-        return account_id, folder_token, uid
+        return folder_token, uid
+
+    def _ensure_required_summary_fields(summary: Any) -> tuple[bool, str | None]:
+        missing: list[str] = []
+        if not summary.folder_path:
+            missing.append("folder_path")
+        if not summary.folder_token:
+            missing.append("folder_token")
+        if not summary.uid:
+            missing.append("uid")
+        if not summary.resource_uri:
+            missing.append("resource_uri")
+        if not summary.raw_resource_uri:
+            missing.append("raw_resource_uri")
+        if missing:
+            message_id = getattr(summary, "resource_uri", None) or getattr(summary, "uid", "unknown")
+            return False, f"Connector returned incomplete metadata for {message_id}: missing {', '.join(missing)}"
+        return True, None
 
     def _address_to_contact(address: Any) -> MailContact:
         return MailContact(name=address.display_name, email=address.address)
@@ -194,7 +228,6 @@ def create_server(settings: MailSettings) -> FastMCP:
         data: dict[str, Any] = {
             "id": summary.resource_uri,
             "thread_id": getattr(summary, "thread_id", None) or summary.uid,
-            "account_id": summary.account_id,
             "folder": summary.folder_path,
             "folder_token": summary.folder_token,
             "uid": summary.uid,
@@ -225,9 +258,14 @@ def create_server(settings: MailSettings) -> FastMCP:
         item = MailMessageItem(**data)
         return item, message_date
 
+    mailbox_description = ""
+    if settings.account.description:
+        mailbox_description = f"Mailbox: {settings.account.description}\n"
+
     @mcp.tool(
         name="mail.fetch",
         description=(
+            f"{mailbox_description}"
             "Single tool for listing, searching, and reading mail.\n"
             "- ids?: fetch exact message ids (use the `id` returned previously).\n"
             "- query?: free-text/provider query; combine with folder (name or encoded token).\n"
@@ -343,22 +381,18 @@ def create_server(settings: MailSettings) -> FastMCP:
             items: list[MailMessageItem] = []
             for message_id in explicit_ids:
                 try:
-                    account_id, folder_token, uid = _parse_message_id(message_id)
+                    folder_token, uid = _parse_message_id(message_id)
                 except ValueError as exc:
                     errors.append(MailFetchError(id=message_id, error=str(exc)))
-                    continue
-                if account_id != settings.account.id:
-                    errors.append(
-                        MailFetchError(
-                            id=message_id,
-                            error=f"message_id belongs to account '{account_id}', expected '{settings.account.id}'",
-                        )
-                    )
                     continue
                 try:
                     detail = await _run(service.fetch_message, folder_token, uid)
                 except MessageNotFoundError as exc:
                     errors.append(MailFetchError(id=message_id, error=str(exc)))
+                    continue
+                ok, warning = _ensure_required_summary_fields(detail)
+                if not ok:
+                    errors.append(MailFetchError(id=message_id, error=warning or "Incomplete connector metadata"))
                     continue
                 attachments_payload = await _render_attachments(detail, attachments_mode)
                 item, _ = _build_message_item(
@@ -413,6 +447,10 @@ def create_server(settings: MailSettings) -> FastMCP:
         returned_ids: list[str] = []
         for summary in summaries:
             if summary.resource_uri in seen_ids:
+                continue
+            ok, warning = _ensure_required_summary_fields(summary)
+            if not ok:
+                errors.append(MailFetchError(id=summary.resource_uri, error=warning or "Incomplete connector metadata"))
                 continue
             detail = None
             if include_mode == "full" or attachments_mode in {"meta", "inline"}:
@@ -474,17 +512,30 @@ def create_server(settings: MailSettings) -> FastMCP:
             }
         )
 
-        result = MailFetchResult(
-            items=items,
-            next_cursor=next_cursor,
-            sync_cursor=sync_cursor,
-            errors=errors or None,
-        )
+        try:
+            result = MailFetchResult(
+                items=items,
+                next_cursor=next_cursor,
+                sync_cursor=sync_cursor,
+                errors=errors or None,
+            )
+        except Exception as exc:
+            logger.exception(
+                "mail.fetch response failed validation: %s\nitems=%r\nerrors=%r\nnext_cursor=%r\nsync_cursor=%r",
+                exc,
+                items,
+                errors,
+                next_cursor,
+                sync_cursor,
+            )
+            raise
+        logger.debug("mail.fetch returning payload: %s", json.dumps(result.model_dump(by_alias=True, exclude_none=False)))
         return result
 
     @mcp.tool(
         name="mail.download_attachment",
         description=(
+            f"{mailbox_description}"
             "Fetch a single attachment by message id + attachment id. "
             "Accepts provider ids or positional indices and returns base64-encoded bytes plus filename, size, mime type, "
             "and any direct download URL."
@@ -497,11 +548,9 @@ def create_server(settings: MailSettings) -> FastMCP:
     ) -> MailDownloadAttachmentResult:
         payload = MailDownloadAttachmentInput(message_id=message_id, attachment_id=attachment_id)
         try:
-            account_id, folder_token, uid = _parse_message_id(payload.message_id)
+            folder_token, uid = _parse_message_id(payload.message_id)
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
-        if account_id != settings.account.id:
-            raise ValueError(f"message_id belongs to account '{account_id}', expected '{settings.account.id}'")
         identifier: int | str = payload.attachment_id
         if isinstance(identifier, str) and identifier.isdigit():
             identifier = int(identifier)
@@ -513,47 +562,59 @@ def create_server(settings: MailSettings) -> FastMCP:
         )
 
         attachment_payload = _serialise_attachment(attachment)
-        result = MailDownloadAttachmentResult(
-            message_id=payload.message_id,
-            attachment=attachment_payload,
+        try:
+            result = MailDownloadAttachmentResult(
+                message_id=payload.message_id,
+                attachment=attachment_payload,
+            )
+        except Exception as exc:
+            logger.exception(
+                "mail.download_attachment response failed validation: %s\nmessage_id=%s\nattachment=%r",
+                exc,
+                payload.message_id,
+                attachment_payload,
+            )
+            raise
+        logger.debug(
+            "mail.download_attachment returning payload: %s",
+            json.dumps(result.model_dump(by_alias=True, exclude_none=False)),
         )
         return result
 
     @mcp.resource(
-        "mail://{account_id}/{folder_token}/{uid}",
+        "mail://{folder_token}/{uid}",
         description="Plain text representation of the message body.",
         mime_type="text/plain",
     )
-    async def message_text(account_id: str, folder_token: str, uid: str) -> str:
+    async def message_text(folder_token: str, uid: str) -> str:
         detail = await _run(service.fetch_message, folder_token, uid)
         body = detail.body.text or detail.body.html or "(no body)"
         return body
 
     @mcp.resource(
-        "mail+html://{account_id}/{folder_token}/{uid}",
+        "mail+html://{folder_token}/{uid}",
         description="HTML representation of the message body if available.",
         mime_type="text/html",
     )
-    async def message_html(account_id: str, folder_token: str, uid: str) -> str:
+    async def message_html(folder_token: str, uid: str) -> str:
         detail = await _run(service.fetch_message, folder_token, uid)
         return detail.body.html or detail.body.text or "<p>(no html body)</p>"
 
     @mcp.resource(
-        "mail+raw://{account_id}/{folder_token}/{uid}",
+        "mail+raw://{folder_token}/{uid}",
         description="Raw RFC822 message source.",
         mime_type="message/rfc822",
     )
-    async def message_raw(account_id: str, folder_token: str, uid: str) -> bytes:
+    async def message_raw(folder_token: str, uid: str) -> bytes:
         raw = await _run(service.fetch_raw_message, folder_token, uid)
         return raw
 
     @mcp.resource(
-        "mail+attachment://{account_id}/{folder_token}/{uid}/{attachment_identifier}",
+        "mail+attachment://{folder_token}/{uid}/{attachment_identifier}",
         description="Binary attachment payload.",
         mime_type="application/octet-stream",
     )
     async def attachment_resource(
-        account_id: str,
         folder_token: str,
         uid: str,
         attachment_identifier: str,
@@ -570,6 +631,16 @@ def create_server(settings: MailSettings) -> FastMCP:
             identifier,
         )
         return attachment.data
+
+    @mcp.resource(
+        "mail+folders://default",
+        description="JSON list of folders available in the mailbox.",
+        mime_type="application/json",
+    )
+    async def folders_resource() -> str:
+        folders = await _run(service.list_folders)
+        payload = [_to_dict(folder) for folder in folders]
+        return json.dumps(payload, ensure_ascii=False, indent=2)
 
     return mcp
 

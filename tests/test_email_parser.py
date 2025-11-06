@@ -17,7 +17,6 @@ def test_create_summary_from_message():
     raw = build_message()
     message = parse_rfc822_message(raw)
     summary = create_summary_from_message(
-        account_id="acc",
         folder_path="INBOX",
         uid="123",
         message=message,

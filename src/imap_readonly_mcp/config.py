@@ -92,7 +92,6 @@ class ConnectorSecurityConfig(BaseModel):
 class MailAccountConfig(BaseModel):
     """Configuration for a single email account exposed through the server."""
 
-    id: str = Field(description="Unique identifier to reference the account from tools.")
     protocol: AccountProtocol = Field(description="Protocol used to access this mailbox.")
     description: str | None = Field(default=None, description="Human readable description of the account.")
 
@@ -105,10 +104,6 @@ class MailAccountConfig(BaseModel):
         default_factory=ConnectorSecurityConfig, description="Transport security options."
     )
     timeout_seconds: float = Field(default=30.0, ge=5.0, le=180.0, description="Socket timeout used by the connector.")
-    default_folder: str | None = Field(
-        default=None,
-        description="Preferred default folder/mailbox to use when none is explicitly supplied.",
-    )
     allowed_folders: list[str] | None = Field(
         default=None,
         description="Optional allow-list of folders that can be accessed via the server.",
@@ -210,7 +205,14 @@ def load_settings(config_path: Path | None = None, overrides: dict[str, Any] | N
     if "account" not in base_data:
         legacy_accounts = base_data.get("accounts")
         if legacy_accounts:
-            base_data["account"] = legacy_accounts[0]
+            if isinstance(legacy_accounts, list):
+                if not legacy_accounts:
+                    raise ConfigurationError("Legacy 'accounts' array is empty; provide at least one account.")
+                base_data["account"] = legacy_accounts[0]
+            elif isinstance(legacy_accounts, dict):
+                base_data["account"] = legacy_accounts
+            else:
+                raise ConfigurationError("Legacy 'accounts' must be a list or mapping.")
         else:
             raise ConfigurationError("Configuration must specify 'account'.")
     base_data.pop("accounts", None)

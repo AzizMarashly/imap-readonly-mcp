@@ -64,7 +64,6 @@ class POP3ReadOnlyConnector(ReadOnlyMailConnector):
     def list_folders(self) -> list[FolderInfo]:
         return [
             FolderInfo(
-                account_id=self.config.id,
                 path="INBOX",
                 encoded_path=encode_folder_path("INBOX"),
                 role=MailboxRole.INBOX,
@@ -90,7 +89,6 @@ class POP3ReadOnlyConnector(ReadOnlyMailConnector):
                 raw = self._retrieve_message(conn, index)
                 message = parse_rfc822_message(raw)
                 summary = create_summary_from_message(
-                    account_id=self.config.id,
                     folder_path="INBOX",
                     uid=str(index),
                     message=message,
@@ -105,7 +103,6 @@ class POP3ReadOnlyConnector(ReadOnlyMailConnector):
             raw = self._retrieve_message(conn, int(uid))
             message = parse_rfc822_message(raw)
             summary = create_summary_from_message(
-                account_id=self.config.id,
                 folder_path="INBOX",
                 uid=uid,
                 message=message,
@@ -115,7 +112,6 @@ class POP3ReadOnlyConnector(ReadOnlyMailConnector):
                 body=extract_body(message),
                 attachments=extract_attachments(
                     message,
-                    account_id=self.config.id,
                     folder_path="INBOX",
                     uid=uid,
                 ),

@@ -13,7 +13,7 @@ def _nullable_string_field(*, description: str, examples: list[str] | None = Non
         default=None,
         description=description,
         examples=examples,
-        json_schema_extra={"type": "string", "nullable": True},
+        json_schema_extra={"nullable": True},
     )
 
 
@@ -23,7 +23,6 @@ def _nullable_string_list_field(*, description: str) -> Any:
         default=None,
         description=description,
         json_schema_extra={
-            "type": "array",
             "nullable": True,
             "items": {"type": "string"},
         },
@@ -49,7 +48,7 @@ class MailFetchInput(BaseModel):
                     "include_attachments": "meta",
                 },
                 {
-                    "ids": ["mail://primary/SU5CT1g=/12345"],
+                    "ids": ["mail://SU5CT1g=/12345"],
                     "include": "full",
                     "include_attachments": "inline",
                     "expand_thread": True,
@@ -139,7 +138,7 @@ class MailAttachment(BaseModel):
                     "filename": "invoice.pdf",
                     "size": 23456,
                     "mime": "application/pdf",
-                    "download_url": "mail+attachment://primary/SU5CT1g=/12345/att-001",
+                    "download_url": "mail+attachment://SU5CT1g=/12345/att-001",
                 }
             ]
         },
@@ -181,14 +180,13 @@ class MailMessageItem(BaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "id": "mail://primary/SU5CT1g=/12345",
+                    "id": "mail://SU5CT1g=/12345",
                     "thread_id": "t-42",
-                    "account_id": "primary",
                     "folder": "INBOX",
                     "folder_token": "SU5CT1g=",
                     "uid": "12345",
-                    "resource_uri": "mail://primary/SU5CT1g=/12345",
-                    "raw_resource_uri": "mail+raw://primary/SU5CT1g=/12345",
+                    "resource_uri": "mail://SU5CT1g=/12345",
+                    "raw_resource_uri": "mail+raw://SU5CT1g=/12345",
                     "date": "2025-11-01T09:12:03Z",
                     "from": [{"name": "Alice", "email": "alice@example.com"}],
                     "to": [{"name": "You", "email": "you@example.com"}],
@@ -202,7 +200,7 @@ class MailMessageItem(BaseModel):
                             "filename": "inv.pdf",
                             "size": 23456,
                             "mime": "application/pdf",
-                            "download_url": "mail+attachment://primary/SU5CT1g=/12345/att-001",
+                            "download_url": "mail+attachment://SU5CT1g=/12345/att-001",
                         }
                     ],
                 }
@@ -212,7 +210,6 @@ class MailMessageItem(BaseModel):
 
     id: str = Field(description="Unique resource identifier for the message.")
     thread_id: str | None = Field(default=None, description="Provider-specific thread/conversation identifier.")
-    account_id: str = Field(description="Owning account identifier.")
     folder: str = Field(description="Folder/mailbox display path.")
     folder_token: str = Field(description="Opaque folder token usable with other mail tools.")
     uid: str = Field(description="Provider-specific message identifier within the folder.")
@@ -259,8 +256,8 @@ class MailFetchError(BaseModel):
         title="Mail Fetch Error",
         json_schema_extra={
             "examples": [
-                {"id": "mail://primary/SU5CT1g=/99999", "error": "Message not found"},
-                {"error": "Unsupported message_id format; expected mail://account/folder_token/uid"},
+                {"id": "mail://SU5CT1g=/99999", "error": "Message not found"},
+                {"error": "Unsupported message_id format; expected mail://{folder_token}/{uid}"},
             ]
         },
     )
@@ -284,14 +281,13 @@ class MailFetchResult(BaseModel):
                 {
                     "items": [
                         {
-                            "id": "mail://primary/SU5CT1g=/12345",
+                            "id": "mail://SU5CT1g=/12345",
                             "thread_id": "t-42",
-                            "account_id": "primary",
                             "folder": "INBOX",
                             "folder_token": "SU5CT1g=",
                             "uid": "12345",
-                            "resource_uri": "mail://primary/SU5CT1g=/12345",
-                            "raw_resource_uri": "mail+raw://primary/SU5CT1g=/12345",
+                            "resource_uri": "mail://SU5CT1g=/12345",
+                            "raw_resource_uri": "mail+raw://SU5CT1g=/12345",
                             "date": "2025-11-01T09:12:03Z",
                             "from": [{"name": "Alice", "email": "alice@example.com"}],
                             "to": [{"name": "You", "email": "you@example.com"}],
@@ -305,7 +301,7 @@ class MailFetchResult(BaseModel):
                                     "filename": "inv.pdf",
                                     "size": 23456,
                                     "mime": "application/pdf",
-                                    "download_url": "mail+attachment://primary/SU5CT1g=/12345/att-001",
+                                    "download_url": "mail+attachment://SU5CT1g=/12345/att-001",
                                 }
                             ],
                         }
@@ -338,7 +334,7 @@ class MailDownloadAttachmentInput(BaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "message_id": "mail://primary/SU5CT1g=/12345",
+                    "message_id": "mail://SU5CT1g=/12345",
                     "attachment_id": "att-001",
                 }
             ]
@@ -347,7 +343,7 @@ class MailDownloadAttachmentInput(BaseModel):
 
     message_id: str = Field(
         description="Message identifier taken from the `id` field returned by mail.fetch.",
-        examples=["mail://primary/SU5CT1g=/12345"],
+        examples=["mail://SU5CT1g=/12345"],
     )
     attachment_id: str | int = Field(
         description="Attachment identifier (provider ID or numeric index for legacy protocols).",
@@ -364,13 +360,13 @@ class MailDownloadAttachmentResult(BaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "message_id": "mail://primary/SU5CT1g=/12345",
+                    "message_id": "mail://SU5CT1g=/12345",
                     "attachment": {
                         "id": "att-001",
                         "filename": "inv.pdf",
                         "size": 23456,
                         "mime": "application/pdf",
-                        "download_url": "mail+attachment://primary/SU5CT1g=/12345/att-001",
+                        "download_url": "mail+attachment://SU5CT1g=/12345/att-001",
                         "data_base64": "<base64>",
                         "inline_bytes": 23456,
                     },

@@ -166,7 +166,6 @@ class IMAPReadOnlyConnector(ReadOnlyMailConnector):
                 role = _infer_mailbox_role(mailbox)
                 selectable = "\\Noselect" not in flags
                 folder = FolderInfo(
-                    account_id=self.config.id,
                     path=mailbox,
                     encoded_path=encode_folder_path(mailbox),
                     role=role,
@@ -178,7 +177,7 @@ class IMAPReadOnlyConnector(ReadOnlyMailConnector):
         return folders
 
     def search_messages(self, filters: MessageSearchFilters) -> list[MessageSummary]:
-        folder = filters.folder or self.config.default_folder or "INBOX"
+        folder = filters.folder or "INBOX"
         uids = self._search_uids(folder, filters)
         offset = filters.offset or 0
         limit = filters.limit
@@ -206,11 +205,6 @@ class IMAPReadOnlyConnector(ReadOnlyMailConnector):
         ]
         if not folders:
             return []
-
-        default_folder = self.config.default_folder
-        if default_folder and default_folder in folders:
-            folders.remove(default_folder)
-            folders.insert(0, default_folder)
 
         offset = filters.offset or 0
         limit = filters.limit or 0
@@ -265,7 +259,6 @@ class IMAPReadOnlyConnector(ReadOnlyMailConnector):
             message = parse_rfc822_message(raw_bytes)
             flags = resp["flags"]
             summary = create_summary_from_message(
-                account_id=self.config.id,
                 folder_path=folder_path,
                 uid=uid,
                 message=message,
@@ -275,7 +268,6 @@ class IMAPReadOnlyConnector(ReadOnlyMailConnector):
             body = extract_body(message)
             attachments = extract_attachments(
                 message,
-                account_id=self.config.id,
                 folder_path=folder_path,
                 uid=uid,
             )
@@ -343,7 +335,6 @@ class IMAPReadOnlyConnector(ReadOnlyMailConnector):
         message = parse_rfc822_message(header_bytes)
         preview = _build_preview(snippet_bytes)
         summary = create_summary_from_message(
-            account_id=self.config.id,
             folder_path=folder_path,
             uid=uid,
             message=message,

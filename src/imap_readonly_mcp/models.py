@@ -24,7 +24,6 @@ class MailboxRole(str, Enum):
 class FolderInfo(BaseModel):
     """Metadata describing an accessible folder/mailbox."""
 
-    account_id: str = Field(description="Identifier of the owning account.")
     path: str = Field(description="IMAP style folder path or POP3 virtual identifier.")
     encoded_path: str = Field(
         description="URL-safe encoded folder identifier used in resource URIs. Consumers should treat as opaque."
@@ -69,7 +68,6 @@ class MessageFlags(BaseModel):
 class MessageSummary(BaseModel):
     """High level metadata about a message returned by search/list operations."""
 
-    account_id: str = Field(description="Owning account identifier.")
     folder_path: str = Field(description="Original folder path from the connector.")
     folder_token: str = Field(description="URL-safe token used to address the folder in resource URIs.")
     uid: str = Field(description="Protocol specific message unique identifier.")
@@ -109,18 +107,6 @@ class MessageDetail(MessageSummary):
     headers: dict[str, list[str]] = Field(default_factory=dict, description="Multi-valued header mapping.")
     raw_source: str | None = Field(
         default=None, description="Raw RFC822 source (decoded as UTF-8 with surrogate escapes)."
-    )
-
-
-class AccountInfo(BaseModel):
-    """Summary of an account exposed via the server."""
-
-    id: str = Field(description="Account identifier.")
-    protocol: str = Field(description="Configured protocol string.")
-    description: str | None = Field(default=None, description="Human readable description.")
-    default_folder: str | None = Field(default=None, description="Configured default folder for searches.")
-    oauth_scopes: list[str] | None = Field(
-        default=None, description="Scopes required for OAuth flows, if applicable."
     )
 
 

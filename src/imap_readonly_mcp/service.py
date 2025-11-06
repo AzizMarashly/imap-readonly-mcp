@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 
 from dateparser import parse as parse_datetime
@@ -19,9 +20,9 @@ from .exceptions import (
     MessageNotFoundError,
 )
 from .models import (
-    AccountInfo,
     AttachmentContent,
     FolderInfo,
+    MailboxRole,
     MessageDetail,
     MessageSearchFilters,
     MessageSummary,
@@ -35,18 +36,6 @@ class MailService:
     def __init__(self, settings: MailSettings) -> None:
         self.settings = settings
         self._connector: ReadOnlyMailConnector | None = None
-
-    def list_accounts(self) -> list[AccountInfo]:
-        account = self.settings.account
-        return [
-            AccountInfo(
-                id=account.id,
-                protocol=account.protocol.value,
-                description=account.description,
-                default_folder=account.default_folder,
-                oauth_scopes=account.oauth.scopes if account.oauth else None,
-            )
-        ]
 
     def list_folders(self) -> list[FolderInfo]:
         connector = self._get_connector()
@@ -133,16 +122,19 @@ class MailService:
         if not connector.capabilities.supports_folders:
             return connector.search_messages(filters)
 
-        folders = [
-            folder.path for folder in self.list_folders() if folder.selectable
-        ]
-        if not folders:
+        folder_infos = [folder for folder in self.list_folders() if folder.selectable]
+        if not folder_infos:
             return []
 
-        default_folder = self.settings.account.default_folder
-        if default_folder and default_folder in folders:
-            folders.remove(default_folder)
-            folders.insert(0, default_folder)
+        all_mail_folder = self._find_all_mail_folder(folder_infos)
+        if all_mail_folder:
+            return connector.search_messages(
+                filters.model_copy(update={"folder": all_mail_folder, "offset": filters.offset})
+            )
+
+        folders = [folder.path for folder in folder_infos]
+        if not folders:
+            return []
 
         offset = filters.offset or 0
         limit = filters.limit or self.settings.default_search_limit
@@ -187,6 +179,36 @@ class MailService:
         if limit:
             summaries = summaries[:limit]
         return summaries
+
+    def _find_all_mail_folder(self, folders: list[FolderInfo]) -> str | None:
+        scored: list[tuple[int, FolderInfo]] = []
+        for folder in folders:
+            if not folder.selectable:
+                continue
+            name = folder.path
+            normalized = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+            tokens = set(normalized.split())
+
+            if folder.role == MailboxRole.ARCHIVE:
+                scored.append((0, folder))
+                continue
+
+            if "all mail" in normalized:
+                scored.append((1, folder))
+                continue
+
+            if "all messages" in normalized or "all items" in normalized:
+                scored.append((2, folder))
+                continue
+
+            if "all" in tokens and ({"mail", "mails", "mailbox"} & tokens or {"messages", "items"} & tokens):
+                scored.append((3, folder))
+
+        if not scored:
+            return None
+
+        scored.sort(key=lambda item: item[0])
+        return scored[0][1].path
 
 
 def _ensure_datetime(value: datetime | str | None) -> datetime | None:

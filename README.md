@@ -64,7 +64,6 @@ account:
   port: 993
   username: alice@example.com
   password: change-me
-  default_folder: INBOX
 ```
 
 ### Environment Variables

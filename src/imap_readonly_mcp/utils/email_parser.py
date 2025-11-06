@@ -99,7 +99,6 @@ def extract_body(message: Message) -> MessageBody:
 def extract_attachments(
     message: Message,
     *,
-    account_id: str,
     folder_path: str,
     uid: str,
 ) -> list[AttachmentMetadata]:
@@ -119,7 +118,7 @@ def extract_attachments(
                 filename=filename,
                 content_type=part.get_content_type() or "application/octet-stream",
                 size=len(part.get_payload(decode=True) or b""),
-                resource_uri=f"mail+attachment://{account_id}/{folder_token}/{uid}/{index}",
+                resource_uri=f"mail+attachment://{folder_token}/{uid}/{index}",
             )
         )
         index += 1
@@ -152,7 +151,6 @@ def get_attachment_payload(message: Message, attachment_index: int) -> tuple[Att
 
 def create_summary_from_message(
     *,
-    account_id: str,
     folder_path: str,
     uid: str,
     message: Message,
@@ -164,7 +162,6 @@ def create_summary_from_message(
     subject = decode_mime_words(message.get("Subject"))
     summary_snippet = snippet or _build_snippet_from_message(message)
     return MessageSummary(
-        account_id=account_id,
         folder_path=folder_path,
         folder_token=folder_token,
         uid=uid,
@@ -178,8 +175,8 @@ def create_summary_from_message(
         snippet=summary_snippet,
         has_attachments=any(part.get_content_disposition() == "attachment" for part in message.walk()),
         flags=flags or MessageFlags(),
-        resource_uri=f"mail://{account_id}/{folder_token}/{uid}",
-        raw_resource_uri=f"mail+raw://{account_id}/{folder_token}/{uid}",
+        resource_uri=f"mail://{folder_token}/{uid}",
+        raw_resource_uri=f"mail+raw://{folder_token}/{uid}",
     )
 
 

@@ -68,7 +68,6 @@ class GraphReadOnlyConnector(ReadOnlyMailConnector):
             display = item.get("displayName", folder_id)
             folders.append(
                 FolderInfo(
-                    account_id=self.config.id,
                     path=folder_id,
                     encoded_path=encode_folder_path(folder_id),
                     role=_infer_folder_role(display),
@@ -120,7 +119,7 @@ class GraphReadOnlyConnector(ReadOnlyMailConnector):
         headers["Prefer"] = 'outlook.body-content-type="text"'
         response = self._session.get(url, headers=headers, params=params)
         if response.status_code == 404:
-            raise MessageNotFoundError(f"Message {uid} not found in Graph account {self.config.id}")
+            raise MessageNotFoundError(f"Message {uid} not found in Graph mailbox")
         response.raise_for_status()
         payload = response.json()
         summary = self._convert_message_summary(payload, payload.get("parentFolderId"))
@@ -138,13 +137,19 @@ class GraphReadOnlyConnector(ReadOnlyMailConnector):
                     filename=attachment.get("name") or "attachment",
                     content_type=attachment.get("contentType", "application/octet-stream"),
                     size=attachment.get("size"),
-                    resource_uri=f"mail+attachment://{self.config.id}/{summary.folder_token}/{summary.uid}/{attachment['id']}",
+                    resource_uri=f"mail+attachment://{summary.folder_token}/{summary.uid}/{attachment['id']}",
                 )
             )
 
         headers_map: dict[str, list[str]] = {}
         for header in payload.get("internetMessageHeaders", []):
-            headers_map.setdefault(header.get("name", ""), []).append(header.get("value", ""))
+            name = header.get("name") or ""
+            value = header.get("value")
+            if value is None:
+                value = ""
+            else:
+                value = str(value)
+            headers_map.setdefault(name, []).append(value)
 
         detail = MessageDetail(
             **summary.model_dump(),
@@ -159,7 +164,7 @@ class GraphReadOnlyConnector(ReadOnlyMailConnector):
         url = f"{GRAPH_API_ROOT}/{self._resource_path}/messages/{uid}/$value"
         response = self._session.get(url, headers=self._headers(), stream=True)
         if response.status_code == 404:
-            raise MessageNotFoundError(f"Message {uid} not found in Graph account {self.config.id}")
+            raise MessageNotFoundError(f"Message {uid} not found in Graph mailbox")
         response.raise_for_status()
         return response.content
 
@@ -190,7 +195,7 @@ class GraphReadOnlyConnector(ReadOnlyMailConnector):
             filename=attachment_payload.get("name") or "attachment",
             content_type=attachment_payload.get("contentType", "application/octet-stream"),
             size=attachment_payload.get("size"),
-            resource_uri=f"mail+attachment://{self.config.id}/{encode_folder_path(folder_path)}/{uid}/{attachment_id}",
+            resource_uri=f"mail+attachment://{encode_folder_path(folder_path)}/{uid}/{attachment_id}",
         )
         return AttachmentContent(
             metadata=metadata,
@@ -247,7 +252,6 @@ class GraphReadOnlyConnector(ReadOnlyMailConnector):
         folder_token = encode_folder_path(folder_id)
         message_id = payload["id"]
         summary = MessageSummary(
-            account_id=self.config.id,
             folder_path=folder_id,
             folder_token=folder_token,
             uid=message_id,
@@ -269,8 +273,8 @@ class GraphReadOnlyConnector(ReadOnlyMailConnector):
                 recent=False,
                 other=[],
             ),
-            resource_uri=f"mail://{self.config.id}/{folder_token}/{message_id}",
-            raw_resource_uri=f"mail+raw://{self.config.id}/{folder_token}/{message_id}",
+            resource_uri=f"mail://{folder_token}/{message_id}",
+            raw_resource_uri=f"mail+raw://{folder_token}/{message_id}",
         )
         return summary
 

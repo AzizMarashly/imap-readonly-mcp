@@ -1,10 +1,8 @@
 # Example configuration file for the read-only mail MCP server.
 account:
-  id: personal-imap
   protocol: imap
   description: "Personal IMAP mailbox"
   host: imap.example.com
   port: 993
   username: user@example.com
   password: change-me
-  default_folder: INBOX

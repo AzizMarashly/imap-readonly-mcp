@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 
 from dateparser import parse as parse_datetime
 
@@ -36,6 +43,11 @@ class MailService:
     def __init__(self, settings: MailSettings) -> None:
         self.settings = settings
         self._connector: ReadOnlyMailConnector | None = None
+        self._cache = _MessageCache(settings.cache_path)
+        self._executor = ThreadPoolExecutor(
+            max_workers=settings.fetch_concurrency,
+            thread_name_prefix="mail-fetch",
+        )
 
     def list_folders(self) -> list[FolderInfo]:
         connector = self._get_connector()
@@ -49,9 +61,11 @@ class MailService:
         return connector.search_messages(normalized_filters)
 
     def fetch_message(self, folder_token: str, uid: str) -> MessageDetail:
-        connector = self._get_connector()
-        folder_path = decode_folder_token(folder_token)
-        detail = connector.fetch_message(folder_path, uid)
+        cached = self._cache.get(folder_token, uid)
+        if cached:
+            return cached
+        detail = self._fetch_message_uncached(folder_token, uid)
+        self._cache.set(folder_token, uid, detail)
         return detail
 
     def fetch_raw_message(self, folder_token: str, uid: str) -> bytes:
@@ -68,6 +82,37 @@ class MailService:
         connector = self._get_connector()
         folder_path = decode_folder_token(folder_token)
         return connector.fetch_attachment(folder_path, uid, attachment_identifier)
+
+    def fetch_details_bulk(
+        self, requests: list[tuple[str, str, str]]
+    ) -> dict[str, MessageDetail]:
+        """Fetch message details for a collection of (resource_uri, folder_token, uid)."""
+        results: dict[str, MessageDetail] = {}
+        missing: list[tuple[str, str, str]] = []
+
+        for resource_uri, folder_token, uid in requests:
+            cached = self._cache.get(folder_token, uid)
+            if cached:
+                results[resource_uri] = cached
+            else:
+                missing.append((resource_uri, folder_token, uid))
+
+        if not missing:
+            return results
+
+        futures = {
+            self._executor.submit(self._fetch_and_cache, folder_token, uid): resource_uri
+            for resource_uri, folder_token, uid in missing
+        }
+        for future in as_completed(futures):
+            resource_uri = futures[future]
+            try:
+                detail = future.result()
+            except Exception:
+                detail = None
+            if detail:
+                results[resource_uri] = detail
+        return results
 
     def _get_connector(self) -> ReadOnlyMailConnector:
         if self._connector:
@@ -209,6 +254,81 @@ class MailService:
 
         scored.sort(key=lambda item: item[0])
         return scored[0][1].path
+
+    def _fetch_and_cache(self, folder_token: str, uid: str) -> MessageDetail | None:
+        try:
+            detail = self._fetch_message_uncached(folder_token, uid)
+            self._cache.set(folder_token, uid, detail)
+            return detail
+        except Exception:
+            return None
+
+    def _fetch_message_uncached(self, folder_token: str, uid: str) -> MessageDetail:
+        connector = self._get_connector()
+        folder_path = decode_folder_token(folder_token)
+        return connector.fetch_message(folder_path, uid)
+
+
+class _MessageCache:
+    """Lightweight SQLite-backed cache keyed by folder token and UID."""
+
+    def __init__(self, db_path: Path | None) -> None:
+        if db_path is None:
+            db_path = Path(os.environ.get("MAIL_CACHE_PATH", "email_cache.sqlite"))
+        self._path = Path(db_path)
+        self._lock = threading.Lock()
+        if self._path.parent and not self._path.parent.exists():
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        con = sqlite3.connect(self._path)
+        con.row_factory = sqlite3.Row
+        return con
+
+    def _ensure_schema(self) -> None:
+        with self._connect() as con:
+            con.execute(
+                """
+                create table if not exists messages (
+                    folder_token text not null,
+                    uid text not null,
+                    updated_at real not null,
+                    payload blob not null,
+                    primary key(folder_token, uid)
+                )
+                """
+            )
+            con.execute(
+                "create index if not exists idx_messages_folder on messages(folder_token)"
+            )
+
+    def get(self, folder_token: str, uid: str) -> MessageDetail | None:
+        with self._lock, self._connect() as con:
+            row = con.execute(
+                "select payload from messages where folder_token=? and uid=?",
+                (folder_token, uid),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            payload = json.loads(row["payload"].decode("utf-8"))
+            return MessageDetail.model_validate(payload)
+        except Exception:
+            return None
+
+    def set(self, folder_token: str, uid: str, detail: MessageDetail) -> None:
+        payload = json.dumps(detail.model_dump(mode="json", by_alias=True), ensure_ascii=False)
+        with self._lock, self._connect() as con:
+            con.execute(
+                """
+                insert into messages(folder_token, uid, updated_at, payload)
+                values(?, ?, strftime('%s','now'), ?)
+                on conflict(folder_token, uid)
+                do update set updated_at=excluded.updated_at, payload=excluded.payload
+                """,
+                (folder_token, uid, payload.encode("utf-8")),
+            )
 
 
 def _ensure_datetime(value: datetime | str | None) -> datetime | None:

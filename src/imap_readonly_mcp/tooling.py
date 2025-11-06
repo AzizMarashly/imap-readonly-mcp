@@ -86,10 +86,13 @@ class MailFetchInput(BaseModel):
     cursor: str | None = _nullable_string_field(
         description="Opaque cursor returned by a previous response (`next_cursor` or `sync_cursor`).",
     )
-    include: Literal["headers", "full"] = Field(
-        default="headers",
-        description='Payload depth: "headers" yields summaries, "full" also includes bodies and expanded headers.',
-        examples=["headers", "full"],
+    include: Literal["metadata", "text", "html", "full"] = Field(
+        default="metadata",
+        description=(
+            "Controls body detail: `metadata` returns headers/snippets only, "
+            "`text` adds plain text, `html` adds HTML only, `full` includes both text and html plus headers."
+        ),
+        examples=["metadata", "text", "html", "full"],
     )
     expand_thread: bool = Field(
         default=False,

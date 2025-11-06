@@ -79,6 +79,12 @@ def create_server(settings: MailSettings) -> FastMCP:
 
     INLINE_ATTACHMENT_MAX_BYTES = 1_000_000
     SYNC_CURSOR_SEEN_CAP = 50
+    INCLUDE_OPTIONS = {
+        "metadata": {"text": False, "html": False, "headers": False},
+        "text": {"text": True, "html": False, "headers": False},
+        "html": {"text": False, "html": True, "headers": False},
+        "full": {"text": True, "html": True, "headers": True},
+    }
 
     def _format_datetime(value: datetime | None) -> str | None:
         if value is None:
@@ -238,6 +244,21 @@ def create_server(settings: MailSettings) -> FastMCP:
             if normalised:
                 snippet_value = normalised
 
+        include_flags = INCLUDE_OPTIONS.get(include_mode, INCLUDE_OPTIONS["metadata"])
+
+        body_text_value: str | None = None
+        body_html_value: str | None = None
+        headers_value: dict[str, list[str]] | None = None
+        if detail:
+            if include_flags["text"]:
+                body_text_value = detail.body.text
+                if not body_text_value and detail.body.html:
+                    body_text_value = _html_to_text(detail.body.html)
+            if include_flags["html"]:
+                body_html_value = detail.body.html
+            if include_flags["headers"]:
+                headers_value = detail.headers
+
         data: dict[str, Any] = {
             "id": summary.resource_uri,
             "thread_id": getattr(summary, "thread_id", None) or summary.uid,
@@ -259,15 +280,10 @@ def create_server(settings: MailSettings) -> FastMCP:
             "flags": summary.flags.model_dump(),
             "attachments": attachments if attachments_mode != "none" else [],
             "thread": [] if expand_thread else None,
+            "body_text": body_text_value if include_flags["text"] else None,
+            "body_html": body_html_value if include_flags["html"] else None,
+            "headers": headers_value if include_flags["headers"] else None,
         }
-        if include_mode == "full" and detail:
-            data["body_text"] = detail.body.text
-            data["body_html"] = detail.body.html
-            data["headers"] = detail.headers
-        else:
-            data["body_text"] = None
-            data["body_html"] = None
-            data["headers"] = None
         item = MailMessageItem(**data)
         return item, message_date
 
@@ -279,19 +295,7 @@ def create_server(settings: MailSettings) -> FastMCP:
         name="mail.fetch",
         description=(
             f"{mailbox_description}"
-            "Single tool for listing, searching, and reading mail.\n"
-            "- ids?: fetch exact message ids (use the `id` returned previously).\n"
-            "- query?: free-text/provider query; combine with folder (name or encoded token).\n"
-            "- since/until?: ISO-8601 or natural language timestamps for time scoping.\n"
-            "- limit?: max items (defaults to server cap ~50, hard max 500).\n"
-            "- cursor?: pass `next_cursor` for pagination or `sync_cursor` for deltas; overrides other filters unless you resupply them.\n"
-            "- include: `headers` for summaries, `full` to add bodies + headers.\n"
-            "- include_attachments: `none`, `meta`, or `inline` (inline base64 is capped at ~1MB per attachment).\n"
-            "- expand_thread?: best-effort thread expansion (empty when the provider lacks conversation metadata).\n"
-            "Response:\n"
-            "{ items: [ {... message fields ... } ], next_cursor, sync_cursor }\n"
-            "Typical flows: list newest (`folder=\"INBOX\"`), continue paging (`cursor=next_cursor`), "
-            "catch up (`cursor=sync_cursor`), read fully (`ids=[...]`, include=\"full\", include_attachments=\"meta\")."
+            "List, search, or read messages from the mailbox with controllable body detail and attachment metadata."
         ),
         structured_output=True,
     )
@@ -355,9 +359,12 @@ def create_server(settings: MailSettings) -> FastMCP:
             ),
         ] = None,
         include: Annotated[
-            Literal["headers", "full"],
-            Field(default="headers", description='`headers` for summaries, `full` to include bodies and headers.'),
-        ] = "headers",
+            Literal["metadata", "text", "html", "full"],
+            Field(
+                default="metadata",
+                description="Controls body content: `metadata`, `text`, `html`, or `full`.",
+            ),
+        ] = "metadata",
         expand_thread: Annotated[
             bool, Field(default=False, description="If true, also request best-effort thread expansion.")
         ] = False,
@@ -383,7 +390,9 @@ def create_server(settings: MailSettings) -> FastMCP:
         except ValueError as exc:
             return MailFetchResult(items=[], next_cursor=None, sync_cursor=None, errors=[MailFetchError(error=str(exc))])
 
-        include_mode = (effective.get("include") or "headers").lower()
+        include_mode = (effective.get("include") or "metadata").lower()
+        if include_mode not in INCLUDE_OPTIONS:
+            include_mode = "metadata"
         attachments_mode = (effective.get("include_attachments") or "none").lower()
         expand_threads = bool(effective.get("expand_thread"))
 
@@ -392,22 +401,36 @@ def create_server(settings: MailSettings) -> FastMCP:
         explicit_ids = effective.get("ids") or []
         if explicit_ids:
             items: list[MailMessageItem] = []
+            requests: list[tuple[str, str, str]] = []
             for message_id in explicit_ids:
                 try:
                     folder_token, uid = _parse_message_id(message_id)
                 except ValueError as exc:
                     errors.append(MailFetchError(id=message_id, error=str(exc)))
                     continue
-                try:
-                    detail = await _run(service.fetch_message, folder_token, uid)
-                except MessageNotFoundError as exc:
-                    errors.append(MailFetchError(id=message_id, error=str(exc)))
-                    continue
+                requests.append((message_id, folder_token, uid))
+
+            detail_map = await _run(service.fetch_details_bulk, requests)
+
+            for message_id, folder_token, uid in requests:
+                detail = detail_map.get(message_id)
+                if detail is None:
+                    try:
+                        detail = await _run(service.fetch_message, folder_token, uid)
+                        detail_map[message_id] = detail
+                    except MessageNotFoundError as exc:
+                        errors.append(MailFetchError(id=message_id, error=str(exc)))
+                        continue
+
                 ok, warning = _ensure_required_summary_fields(detail)
                 if not ok:
                     errors.append(MailFetchError(id=message_id, error=warning or "Incomplete connector metadata"))
                     continue
-                attachments_payload = await _render_attachments(detail, attachments_mode)
+
+                attachments_payload: list[MailAttachment] = []
+                if attachments_mode != "none":
+                    attachments_payload = await _render_attachments(detail, attachments_mode)
+
                 item, _ = _build_message_item(
                     detail,
                     detail,
@@ -458,6 +481,11 @@ def create_server(settings: MailSettings) -> FastMCP:
         items: list[MailMessageItem] = []
         latest_dt: datetime | None = None
         returned_ids: list[str] = []
+        detail_requests = [
+            (summary.resource_uri, summary.folder_token, summary.uid)
+            for summary in summaries
+        ]
+        detail_map = await _run(service.fetch_details_bulk, detail_requests)
         for summary in summaries:
             if summary.resource_uri in seen_ids:
                 continue
@@ -465,28 +493,18 @@ def create_server(settings: MailSettings) -> FastMCP:
             if not ok:
                 errors.append(MailFetchError(id=summary.resource_uri, error=warning or "Incomplete connector metadata"))
                 continue
-            detail = None
-            if include_mode == "full" or attachments_mode in {"meta", "inline"}:
-                try:
-                    detail = await _run(service.fetch_message, summary.folder_token, summary.uid)
-                except MessageNotFoundError as exc:
-                    errors.append(MailFetchError(id=summary.resource_uri, error=str(exc)))
-                    continue
-            attachments_payload: list[MailAttachment] = []
-            if attachments_mode != "none":
-                if detail is None:
-                    try:
-                        detail = await _run(service.fetch_message, summary.folder_token, summary.uid)
-                    except MessageNotFoundError as exc:
-                        errors.append(MailFetchError(id=summary.resource_uri, error=str(exc)))
-                        continue
-                attachments_payload = await _render_attachments(detail, attachments_mode)
+            detail = detail_map.get(summary.resource_uri)
             if detail is None:
                 try:
                     detail = await _run(service.fetch_message, summary.folder_token, summary.uid)
+                    detail_map[summary.resource_uri] = detail
                 except MessageNotFoundError as exc:
                     errors.append(MailFetchError(id=summary.resource_uri, error=str(exc)))
                     continue
+
+            attachments_payload: list[MailAttachment] = []
+            if attachments_mode != "none":
+                attachments_payload = await _render_attachments(detail, attachments_mode)
             item, message_dt = _build_message_item(
                 summary,
                 detail,
@@ -555,9 +573,7 @@ def create_server(settings: MailSettings) -> FastMCP:
         name="mail.download_attachment",
         description=(
             f"{mailbox_description}"
-            "Fetch a single attachment by message id + attachment id. "
-            "Accepts provider ids or positional indices and returns base64-encoded bytes plus filename, size, mime type, "
-            "and any direct download URL."
+            "Download a single attachment for a message, returning metadata plus Base64 content."
         ),
         structured_output=True,
     )

@@ -1,46 +1,22 @@
 # IMAP Read-Only MCP Server
 
-> **Built entirely by AI (OpenAI Codex on behalf of the repo owner).**  
-> The full design, code, documentation, and CI setup were generated autonomously from the user specification.
+Expose a single mailbox to Model Context Protocol (MCP) agents without risking mutations.  
+This server works with IMAP, POP3, and Microsoft Graph mailboxes and focuses on:
 
-The IMAP Read-Only MCP Server exposes mailboxes to AI agents through the [Model Context Protocol](https://modelcontextprotocol.io).  
-It targets a single mailbox (IMAP, POP3, or Microsoft Graph) without mutating message state—messages remain unread, drafts untouched, and folders unchanged.
+- **Immutable access** – every operation uses `SELECT ... READONLY`, no flags are touched.
+- **LLM-friendly payloads** – plain-text snippets, curated metadata, and configurable body detail.
+- **Performance** – SQLite-backed caching plus bounded parallel fetches keep responses snappy.
 
-## Highlights
-
-- [OK] **Zero side effects** - all fetch operations use read-only verbs (`SELECT ... READONLY`, `BODY.PEEK`, Graph `GET`s).
-- [NET] **Protocol coverage** - IMAP, POP3, and Microsoft Graph (OAuth2) connectors with a unified tool interface.
-- [TOOL] **MCP aware** - rich tool set, resource templates for message bodies/raw source/attachments, and diagnostics metadata.
-- [DOCKER] **Production ready** - Docker image, GitHub Actions for CI + release publishing, sample config, and typed Python package.
-- [DOC] **AI-authored docs** - transparent and exhaustive explanation of configuration, architecture, and operations.
+---
 
 ## Quick Start
 
-1. **Clone** and install dependencies (Python 3.11+):
-   ```bash
-   pip install .[all]
-   ```
-2. **Copy the example config** and fill in secrets:
-   ```bash
-   cp config/accounts.example.yaml config/accounts.yaml
-   ```
-3. **Run the server** (stdio transport by default):
-   ```bash
-   imap-readonly-mcp --config config/accounts.yaml
-   ```
-4. **Connect via MCP** - point your MCP-compatible client (e.g. Claude Desktop) at the CLI entrypoint or the provided Docker image.
-
-### Docker
-
 ```bash
-docker build -t ghcr.io/your-org/imap-readonly-mcp:latest .
-docker run --rm \
-  -v "$(pwd)/config/accounts.yaml:/app/config/accounts.yaml:ro" \
-  ghcr.io/your-org/imap-readonly-mcp:latest \
-  --config /app/config/accounts.yaml
+pip install -e .              # install in editable mode
+imap-readonly-mcp --config config/accounts.yaml  # run over stdio
 ```
 
-### Streamable HTTP Transport
+### Streamable HTTP
 
 ```bash
 FASTMCP_TRANSPORT=streamable-http \
@@ -50,105 +26,113 @@ FASTMCP_STREAMABLE_HTTP__PATH=/mcp \
 imap-readonly-mcp --config config/accounts.yaml --transport streamable-http
 ```
 
-The server prints the bound address (for example `http://127.0.0.1:8765/mcp`). Clients must follow the MCP Streamable HTTP handshake and include `Accept: application/json, text/event-stream` when initiating a session.
+### Verbose Logging
+
+```bash
+FASTMCP_LOG_LEVEL=DEBUG imap-readonly-mcp --config config/accounts.yaml
+```
+
+(Values must be one of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. `TRACE` falls back to `DEBUG`.)
+
+---
 
 ## Configuration
 
-Configuration lives in YAML (defaults to `config/accounts.yaml`). See `config/accounts.example.yaml` for a complete template.
+The server reads a single-account YAML file (default `config/accounts.yaml`).  
+Full example (`config/accounts.example.yaml`):
 
 ```yaml
+# Example configuration file for the read-only mail MCP server.
 account:
-  id: personal-imap
-  protocol: imap
+  protocol: imap             # or pop3 / graph
+  description: "Personal IMAP mailbox"
   host: imap.example.com
   port: 993
-  username: alice@example.com
+  username: user@example.com
   password: change-me
+  # cache_path: email_cache.sqlite   # optional SQLite cache location
+  # fetch_concurrency: 6            # max parallel message fetches
 ```
 
 ### Environment Variables
 
-| Variable            | Purpose                                      |
-|---------------------|----------------------------------------------|
-| `MAIL_CONFIG_FILE`  | Override config path (`--config` takes precedence). |
-| `FASTMCP_*`         | Standard FastMCP runtime settings (logging, ports, auth). |
-
-## MCP Tools & Resources
-
-| Tool | Description | Key Inputs |
-|------|-------------|------------|
-| `list_folders` | Returns folders/mailboxes with safe tokens. | – |
-| `search_messages` | Finds messages with text/sender/date filters or quick time frames. Results include the first ~20 lines when available and support limit/offset pagination. | optional folder token, filters, `time_frame`, `offset`, `limit` |
-| `get_message` | Fetches full metadata + body + attachment list. | `folder_token`, `uid` |
-| `get_raw_message` | Returns the RFC822 source (Base64). | `folder_token`, `uid` |
-| `download_attachment` | Streams any attachment as Base64. | `folder_token`, `uid`, attachment id/index |
-### Resource Templates
-
-| URI Template | MIME Type | Notes |
-|--------------|-----------|-------|
-| `mail://{account_id}/{folder_token}/{uid}` | `text/plain` | Plain text or HTML fallback. |
-| `mail+html://{account_id}/{folder_token}/{uid}` | `text/html` | Raw HTML body when available. |
-| `mail+raw://{account_id}/{folder_token}/{uid}` | `message/rfc822` | RFC822 source; perfect for ingestion. |
-| `mail+attachment://{account_id}/{folder_token}/{uid}/{attachment_identifier}` | `application/octet-stream` | Attachment binary payload (index or provider id). |
-
-Use the folder token emitted by `list_folders` / `search_messages`; it encapsulates protocol-specific identifiers safely.
-\n## Architecture
-
-```
-src/imap_readonly_mcp/
-├── config.py            # Pydantic models + loader
-├── connectors/          # IMAP, POP3, Graph read-only connectors
-├── models.py            # Shared Pydantic data models
-├── service.py           # Facade orchestrating connectors
-├── server.py            # FastMCP application + CLI entrypoint
-└── tooling.py           # Tool input models (validation)
-```
-
-Key design notes:
-
-- **Connector isolation** - each protocol lives in its own class implementing a shared `ReadOnlyMailConnector` interface.
-- **No side effects** - IMAP uses `SELECT ... READONLY` + `BODY.PEEK`, POP3 fetches without `DELE`, Graph only performs `GET`.
-- **Central service** - `MailService` normalises filters, handles token decoding, and fans out requests to the appropriate connector.
-- **Resource templates** - a single dynamic resource per concept avoids pre-registering per-message resources.
-- **Thread isolation** - blocking I/O is delegated via `anyio.to_thread.run_sync` so the MCP event loop stays responsive.
-
-## Testing & Quality
-
-```bash
-pip install .[dev]
-pytest
-```
-
-Tests cover encoding helpers and RFC822 parsing. Connectors rely on live infrastructure and are best exercised via integration smoke tests against staging mailboxes.
-
-Static tooling is configured (`ruff`, `mypy`, coverage) and ready for CI execution.
-
-## CI & Releases
-
-- `.github/workflows/ci.yml` - lint + tests on pushes and pull requests.
-- `.github/workflows/release.yml` - tagged releases build wheels, publish to PyPI (placeholder), and push Docker images to GHCR.
-
-Adjust registry names or secrets in the workflow files as needed before publishing.
-
-## Security & Hardening Tips
-
-- Use app passwords or OAuth app registrations scoped to read-only permissions.
-- Supply dedicated service accounts for Graph/Gmail with least privilege.
-- Store secrets outside the repo (e.g. environment variables, encrypted secret stores).
-- The Docker image runs as a non-root user and exposes only the MCP transport.
-
-## Roadmap Ideas
-
-1. Add Gmail API connector with incremental sync cache.
-2. Offer streaming search for huge mailboxes.
-3. Expose message threading / conversation tools.
+| Variable               | Purpose                                                 |
+|------------------------|---------------------------------------------------------|
+| `MAIL_CONFIG_FILE`     | Override config path (`--config` wins).                 |
+| `MAIL_CACHE_PATH`      | Alternate cache location if not set in YAML.            |
+| `MAIL_FETCH_CONCURRENCY` | Override concurrency (same effect as YAML).          |
+| `FASTMCP_*`            | Standard FastMCP options (transport, ports, auth, logging). |
 
 ---
 
-**Authorship notice:** This repository (code + docs) was generated by an AI coding agent (OpenAI Codex for GPT-5). Review, adapt, and extend responsibly before deploying to production.
+## Performance Features
 
+- **SQLite body cache** keyed by `(folder_token, uid)` keeps fetched messages for reuse.
+- **Parallel enrichment** fetches multiple messages simultaneously (bounded by `fetch_concurrency`).
+- **HTML→text conversion** ensures snippets and plain text bodies are readable even for HTML-only mail.
 
+To disable caching, set `cache_path` to `/dev/null` (Unix) or another throwaway location.
 
+---
 
+## MCP Tools
 
+| Tool               | Description                                                          | Key Inputs |
+|--------------------|----------------------------------------------------------------------|------------|
+| `mail.fetch`        | List / search / read messages with controllable detail (see below). | `query`, `folder`, `include`, `cursor`, etc. |
+| `mail.download_attachment` | Download a single attachment (Base64).                    | `message_id`, `attachment_id` |
 
+### `mail.fetch` Include Modes
+
+`include` controls how much body information is returned:
+
+- `metadata` *(default)* – subject, addresses, snippet, flags, attachments meta only.
+- `text` – adds plain text body (HTML converted when necessary).
+- `html` – adds HTML body only.
+- `full` – includes text + HTML + raw headers.
+
+Attachments follow `include_attachments` (`none`, `meta`, `inline`), and thread expansion (`expand_thread`) stays best-effort.
+
+### Response Consistency
+
+All structured fields are curated for LLM prompts:
+
+- Metadata sits at top level (e.g., `from`, `subject`, `snippet`).  
+- Raw headers live only in the `headers` map (available when `include=full`).  
+- Plain-text snippets are derived from the same body served in `body_text`, guaranteeing coherence.
+
+---
+
+## MCP Resources
+
+| URI Template                         | MIME Type           | Notes                                       |
+|--------------------------------------|---------------------|---------------------------------------------|
+| `mail://{folder_token}/{uid}`        | `text/plain`        | Plain text (converted from HTML when needed). |
+| `mail+html://{folder_token}/{uid}`   | `text/html`         | Raw HTML body (if supplied by the provider). |
+| `mail+raw://{folder_token}/{uid}`    | `message/rfc822`    | RFC822 source for ingestion/pipeline jobs.  |
+| `mail+attachment://{folder_token}/{uid}/{attachment_identifier}` | `application/octet-stream` | Attachment bytes (index or provider id). |
+| `mail+folders://default`             | `application/json`  | Enumerates available folders/tokens.        |
+
+---
+
+## Development
+
+```bash
+poetry install          # or pip install -e .[dev]
+pytest                  # run unit tests
+ruff check .            # lint (if installed)
+```
+
+Key directories:
+
+```
+src/imap_readonly_mcp/
+  ├── config.py          # settings & loader
+  ├── connectors/        # IMAP / POP3 / Graph implementations
+  ├── service.py         # caching, parallel fetch orchestration
+  ├── server.py          # FastMCP entrypoint & tool wiring
+  ├── tooling.py         # Pydantic models for tool IO
+  └── utils/             # parsers, identifier helpers, etc.
+```
+
+Feel free to open issues or PRs for additional connectors, caching strategies, or tooling improvements.

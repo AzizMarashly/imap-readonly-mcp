@@ -20,3 +20,4 @@ scratch/
 config/*.yaml.local
 config/*.secrets.yaml
 config/accounts.yaml
+email_cache.sqlite

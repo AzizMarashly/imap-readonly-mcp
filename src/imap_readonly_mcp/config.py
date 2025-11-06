@@ -178,6 +178,16 @@ class MailSettings(BaseSettings):
     connection_retries: int = Field(
         default=3, ge=0, le=10, description="Number of times the server will retry failed connector operations."
     )
+    cache_path: Path | None = Field(
+        default=None,
+        description="Optional path to an on-disk cache used for message bodies (defaults to email_cache.sqlite in the working directory).",
+    )
+    fetch_concurrency: int = Field(
+        default=6,
+        ge=1,
+        le=32,
+        description="Maximum number of parallel message fetch operations when enriching summaries.",
+    )
 
     config_path: Path | None = Field(
         default=None,

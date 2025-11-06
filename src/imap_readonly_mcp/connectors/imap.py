@@ -7,6 +7,8 @@ import contextlib
 import imaplib
 import re
 import socket
+import quopri
+
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from email.message import Message
@@ -32,6 +34,7 @@ from ..utils.email_parser import (
     extract_body,
     get_attachment_payload,
     parse_rfc822_message,
+    _html_to_text,
 )
 from ..utils.identifiers import encode_folder_path
 from .base import ConnectorCapabilities, ReadOnlyMailConnector
@@ -103,13 +106,20 @@ def _decode_mailbox(value: str) -> str:
     return "".join(result)
 
 
-def _build_preview(content: bytes, max_lines: int = 19) -> str | None:
+def _build_preview(content: bytes, max_length: int = 240) -> str | None:
     if not content:
         return None
-    text = content.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
-    lines = text.splitlines()
-    preview = "\n".join(lines[:max_lines]).strip()
-    return preview or None
+    # Try quoted-printable decoding; fall back to raw bytes.
+    try:
+        decoded = quopri.decodestring(content)
+        text = decoded.decode("utf-8", errors="ignore")
+    except Exception:
+        text = content.decode("utf-8", errors="ignore")
+
+    text = _html_to_text(text)
+    if not text:
+        return None
+    return text[:max_length]
 
 
 class IMAPReadOnlyConnector(ReadOnlyMailConnector):

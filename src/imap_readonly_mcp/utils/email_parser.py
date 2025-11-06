@@ -8,6 +8,8 @@ from email.message import Message
 from email.policy import default as default_policy
 from email.utils import getaddresses, parsedate_to_datetime
 from typing import Iterable
+import html
+import re
 
 from charset_normalizer import from_bytes
 
@@ -91,9 +93,15 @@ def extract_body(message: Message) -> MessageBody:
                 text_part, charset = _extract_text_from_part(part)
             elif content_type == "text/html" and html_part is None:
                 html_part, charset = _extract_text_from_part(part)
-        return MessageBody(text=text_part, html=html_part, charset=charset)
-    text, charset = _extract_text_from_part(message)
-    return MessageBody(text=text, html=None, charset=charset)
+        body = MessageBody(text=text_part, html=html_part, charset=charset)
+    else:
+        text, charset = _extract_text_from_part(message)
+        body = MessageBody(text=text, html=None, charset=charset)
+
+    if body.text is None and body.html:
+        converted = _html_to_text(body.html)
+        body.text = converted or None
+    return body
 
 
 def extract_attachments(
@@ -192,9 +200,9 @@ def _build_snippet_from_message(message: Message, max_length: int = 240) -> str 
         snippet = body.text.strip().replace("\r", "").replace("\n", " ")
         return snippet[:max_length]
     if body.html:
-        text = body.html.replace("<br>", " ").replace("<br/>", " ").replace("\n", " ")
-        cleaned = _strip_html(text)
-        return cleaned[:max_length]
+        text = _html_to_text(body.html)
+        if text:
+            return text[:max_length]
     return None
 
 
@@ -212,3 +220,36 @@ def _strip_html(value: str) -> str:
         if not inside_tag:
             result_chars.append(char)
     return "".join(result_chars)
+
+
+def _html_to_text(value: str) -> str:
+    """Convert HTML content into a readable plain text approximation."""
+    if not value:
+        return ""
+    cleaned = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", value)
+    cleaned = re.sub(r"(?i)<br\s*/?>", "\n", cleaned)
+    cleaned = re.sub(r"(?i)</p\s*>", "\n", cleaned)
+    cleaned = html.unescape(cleaned)
+
+    # Drop boundary markers and MIME headers that may still be present.
+    lines: list[str] = []
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lower = line.lower()
+        if line.startswith("--") and "=" in line:
+            continue
+        if lower.startswith("content-type:") or lower.startswith("content-transfer-encoding:") or lower.startswith(
+            "content-disposition:"
+        ) or lower.startswith("mime-version:"):
+            continue
+        lines.append(line)
+
+    cleaned = "\n".join(lines)
+    # Remove residual CSS blocks (e.g. ".class { ... }", "@media ... { ... }").
+    cleaned = re.sub(r"@media[^{]*\{[^}]*\}", " ", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"\.[\w\-]+\s*\{[^}]*\}", " ", cleaned, flags=re.DOTALL)
+    cleaned = _strip_html(cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()

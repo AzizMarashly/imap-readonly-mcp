@@ -6,6 +6,7 @@ import argparse
 import base64
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Annotated, Iterable, Literal
@@ -29,6 +30,7 @@ from .tooling import (
     MailFetchResult,
     MailMessageItem,
 )
+from .utils.email_parser import _html_to_text
 from .utils.identifiers import decode_folder_token
 
 logger = get_logger(__name__)
@@ -225,6 +227,17 @@ def create_server(settings: MailSettings) -> FastMCP:
     ) -> tuple[MailMessageItem, datetime | None]:
         source = detail or summary
         message_date = getattr(source, "date", None)
+        snippet_source: str | None = None
+        if detail and getattr(detail, "body", None):
+            snippet_source = detail.body.text or detail.body.html
+        if not snippet_source:
+            snippet_source = summary.snippet
+        snippet_value = None
+        if snippet_source:
+            normalised = _normalise_snippet(snippet_source)
+            if normalised:
+                snippet_value = normalised
+
         data: dict[str, Any] = {
             "id": summary.resource_uri,
             "thread_id": getattr(summary, "thread_id", None) or summary.uid,
@@ -241,7 +254,7 @@ def create_server(settings: MailSettings) -> FastMCP:
             "reply_to": [_address_to_contact(addr) for addr in summary.reply_to],
             "subject": summary.subject,
             "is_read": summary.flags.seen,
-            "snippet": summary.snippet,
+            "snippet": snippet_value,
             "has_attachments": summary.has_attachments,
             "flags": summary.flags.model_dump(),
             "attachments": attachments if attachments_mode != "none" else [],
@@ -468,6 +481,12 @@ def create_server(settings: MailSettings) -> FastMCP:
                         errors.append(MailFetchError(id=summary.resource_uri, error=str(exc)))
                         continue
                 attachments_payload = await _render_attachments(detail, attachments_mode)
+            if detail is None:
+                try:
+                    detail = await _run(service.fetch_message, summary.folder_token, summary.uid)
+                except MessageNotFoundError as exc:
+                    errors.append(MailFetchError(id=summary.resource_uri, error=str(exc)))
+                    continue
             item, message_dt = _build_message_item(
                 summary,
                 detail,
@@ -669,6 +688,15 @@ def _serialise_attachment(attachment: AttachmentContent) -> MailAttachment:
 
 
 TRANSPORT_CHOICES = ("stdio", "sse", "streamable-http")
+
+
+def _normalise_snippet(text: str, max_length: int = 240) -> str:
+    cleaned = _html_to_text(text)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned[:max_length]
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:

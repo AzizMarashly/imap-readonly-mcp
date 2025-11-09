@@ -1,0 +1,10 @@
+# Example configuration file for the read-only mail MCP server.
+account:
+  protocol: imap
+  description: "Personal IMAP mailbox"
+  host: imap.example.com
+  port: 993
+  username: user@example.com
+  password: change-me
+  # cache_path: email_cache.sqlite
+  # fetch_concurrency: 6

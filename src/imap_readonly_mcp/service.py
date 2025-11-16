@@ -138,8 +138,22 @@ class MailService:
             if until is None:
                 until = frame_until
         folder_path = filters.folder
-        if folder_path and folder_path.startswith("mail://"):
-            folder_path = decode_folder_token(folder_path)
+        # Normalize folder input: accept plain names, encoded tokens, or resource-URI-like inputs.
+        if folder_path:
+            # If a resource URI was mistakenly provided, extract the token portion.
+            if folder_path.startswith("mail://"):
+                try:
+                    token = folder_path.split("://", 1)[1].split("/", 1)[0]
+                    folder_path = decode_folder_token(token)
+                except Exception:
+                    # Fall back to original; connector may still handle or will error meaningfully.
+                    pass
+            else:
+                # Try to interpret as an encoded token; if that fails, leave as-is (plain folder name).
+                try:
+                    folder_path = decode_folder_token(folder_path)
+                except Exception:
+                    pass
         return MessageSearchFilters(
             folder=folder_path,
             text=filters.text,

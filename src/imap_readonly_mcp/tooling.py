@@ -98,7 +98,7 @@ class MailFetchInput(BaseModel):
         description="When true, include other messages from matching threads (best effort per provider).",
     )
     include_attachments: Literal["none", "meta", "inline"] = Field(
-        default="none",
+        default="meta",
         description='Attachment mode: "none" omits them, "meta" returns metadata, "inline" includes small base64 payloads.',
         examples=["none", "meta", "inline"],
     )

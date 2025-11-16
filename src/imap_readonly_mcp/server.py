@@ -10,7 +10,7 @@ import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import anyio
 from mcp.server.fastmcp import FastMCP
@@ -97,6 +97,17 @@ def create_server(settings: MailSettings) -> FastMCP:
             value = value.replace(tzinfo=UTC)
         return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
+    def _ensure_aware_utc(value: datetime | None) -> datetime | None:
+        """Return a timezone-aware UTC datetime for comparisons.
+
+        Ensures we never compare naive and aware datetimes which raises in Python.
+        """
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
     def _resolve_folder_input(folder: str | None) -> str | None:
         if not folder:
             return None
@@ -118,6 +129,31 @@ def create_server(settings: MailSettings) -> FastMCP:
         if not isinstance(payload, dict):
             raise ValueError("Invalid cursor payload")
         return payload
+
+    def _prune_empty(obj: Any) -> Any:
+        """Recursively remove empty strings/lists/dicts and None values.
+
+        Keeps booleans and zeros; only prunes when a container/value is truly empty.
+        """
+        if obj is None:
+            return None
+        if isinstance(obj, str):
+            return obj if obj != "" else None
+        if isinstance(obj, dict):
+            new_dict = {}
+            for k, v in obj.items():
+                pruned = _prune_empty(v)
+                if pruned is not None:
+                    new_dict[k] = pruned
+            return new_dict if new_dict else None
+        if isinstance(obj, list):
+            new_list = []
+            for item in obj:
+                pruned = _prune_empty(item)
+                if pruned is not None:
+                    new_list.append(pruned)
+            return new_list if new_list else None
+        return obj
 
     def _cursor_request_snapshot(effective: dict[str, Any]) -> dict[str, Any]:
         snapshot: dict[str, Any] = {}
@@ -249,6 +285,8 @@ def create_server(settings: MailSettings) -> FastMCP:
     ) -> tuple[MailMessageItem, datetime | None]:
         source = detail or summary
         message_date = getattr(source, "date", None)
+        # Normalize for safe comparisons later
+        message_date = _ensure_aware_utc(message_date)
         snippet_source: str | None = None
         if detail and getattr(detail, "body", None):
             snippet_source = detail.body.text or detail.body.html
@@ -321,62 +359,63 @@ def create_server(settings: MailSettings) -> FastMCP:
             "- `cursor`: opaque string from `next_cursor` or `sync_cursor` to resume.\n"
             "- `include`: `metadata`, `text`, `html`, or `full` to control body payload.\n"
             "- `expand_thread`: true to pull the rest of any matching threads (best effort).\n"
-            "- `include_attachments`: `none`, `meta`, or `inline` for attachment detail."
+            "- `include_attachments`: `none`, `meta`, or `inline` for attachment detail.\n"
+            "Note: this tool omits keys whose values are null or empty ([], {})."
         ),
         structured_output=True,
     )
     async def mail_fetch(
         ids: Annotated[
-            list[str] | None,
+            list[str],
             Field(
-                default=None,
-                description="Fetch these specific message ids (from prior responses).",
+                default_factory=list,
+                description="Exact message ids to fetch (leave empty to search).",
             ),
-        ] = None,
+        ],
         query: Annotated[
-            str | None,
+            str,
             Field(
-                default=None,
-                description="Free-text or provider-specific search query.",
+                default="",
+                description="Free-text/provider query (empty for latest messages).",
             ),
-        ] = None,
+        ] = "",
         folder: Annotated[
-            str | None,
+            str,
             Field(
-                default=None,
-                description="Folder name (e.g. INBOX) or encoded token.",
+                default="",
+                description="Folder path or encoded token (empty = all/inbox heuristics).",
             ),
-        ] = None,
+        ] = "",
         since: Annotated[
-            str | None,
+            str,
             Field(
-                default=None,
-                description="Return messages on/after this timestamp (ISO-8601 or natural language).",
+                default="",
+                description='Lower bound time (ISO-8601 or natural language like "2025-05-01" or "last monday").',
             ),
-        ] = None,
+        ] = "",
         until: Annotated[
-            str | None,
+            str,
             Field(
-                default=None,
-                description="Return messages up to this timestamp (ISO-8601 or natural language).",
+                default="",
+                description='Upper bound time (ISO-8601 or natural language like "yesterday").',
             ),
-        ] = None,
+        ] = "",
         limit: Annotated[
-            int | None,
+            int,
             Field(
-                default=None,
-                ge=1,
+                default=0,
+                ge=0,
                 le=500,
-                description="Maximum messages to return (defaults to a sensible server limit).",
+                description="Max messages (0 = server default).",
             ),
-        ] = None,
+        ] = 0,
         cursor: Annotated[
-            str | None,
+            str,
             Field(
-                default=None,
-                description="Cursor from `next_cursor` or `sync_cursor` to continue paging or delta sync.",
+                default="",
+                description="Cursor from next_cursor/sync_cursor (empty to ignore).",
             ),
-        ] = None,
+        ] = "",
         include: Annotated[
             Literal["metadata", "text", "html", "full"],
             Field(
@@ -389,27 +428,30 @@ def create_server(settings: MailSettings) -> FastMCP:
         ] = False,
         include_attachments: Annotated[
             Literal["none", "meta", "inline"],
-            Field(default="none", description="`none`, `meta`, or `inline` (small base64 payloads)."),
-        ] = "none",
-    ) -> MailFetchResult:
-        payload = MailFetchInput(
-            ids=ids,
-            query=query,
-            folder=folder,
-            since=since,
-            until=until,
-            limit=limit,
-            cursor=cursor,
+            Field(default="meta", description="`none`, `meta`, or `inline` (small base64 payloads)."),
+        ] = "meta",
+    ) -> dict[str, Any]:
+        # Map simple defaults to the model's optional fields
+        request_payload = MailFetchInput(
+            ids=(ids or None),
+            query=(query or None),
+            folder=(folder or None),
+            since=(since or None),
+            until=(until or None),
+            limit=(None if not limit else limit),
+            cursor=(cursor or None),
             include=include,
             expand_thread=expand_thread,
             include_attachments=include_attachments,
         )
         try:
-            effective, cursor_state = _merge_cursor(payload)
+            effective, cursor_state = _merge_cursor(request_payload)
         except ValueError as exc:
-            return MailFetchResult(
+            error_result = MailFetchResult(
                 items=[], next_cursor=None, sync_cursor=None, errors=[MailFetchError(error=str(exc))]
             )
+            response_payload = _prune_empty(error_result.model_dump(by_alias=True, exclude_none=True))
+            return response_payload
 
         include_mode = (effective.get("include") or "metadata").lower()
         if include_mode not in INCLUDE_OPTIONS:
@@ -469,7 +511,8 @@ def create_server(settings: MailSettings) -> FastMCP:
                 sync_cursor=None,
                 errors=errors or None,
             )
-            return result
+            response_payload = _prune_empty(result.model_dump(by_alias=True, exclude_none=True))
+            return response_payload
 
         folder_input = effective.get("folder")
         resolved_folder = _resolve_folder_input(folder_input)
@@ -538,7 +581,10 @@ def create_server(settings: MailSettings) -> FastMCP:
             items.append(item)
             returned_ids.append(item.id)
             if message_dt:
-                if latest_dt is None or message_dt > latest_dt:
+                # Normalize for consistent, comparable timezone-aware values
+                message_dt = _ensure_aware_utc(message_dt)
+                latest_dt = _ensure_aware_utc(latest_dt)
+                if latest_dt is None or (message_dt and message_dt > latest_dt):
                     latest_dt = message_dt
 
         request_snapshot = _cursor_request_snapshot(effective)
@@ -588,11 +634,9 @@ def create_server(settings: MailSettings) -> FastMCP:
                 sync_cursor,
             )
             raise
-        logger.debug(
-            "mail_fetch returning payload: %s",
-            json.dumps(result.model_dump(by_alias=True, exclude_none=False)),
-        )
-        return result
+        response_payload = _prune_empty(result.model_dump(by_alias=True, exclude_none=True))
+        logger.debug("mail_fetch returning payload: %s", json.dumps(response_payload))
+        return response_payload
 
     @mcp.tool(
         name="mail_download_attachment",
@@ -794,7 +838,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     if transport == "sse":
         mount_path = os.environ.get("FASTMCP_SSE_MOUNT_PATH", server.settings.mount_path)
 
-    server.run(transport=transport, mount_path=mount_path)
+    transport_lit = cast(Literal["stdio", "sse", "streamable-http"], transport)
+    server.run(transport=transport_lit, mount_path=mount_path)
 
 
 def _coerce_int(value: str | None, default: int) -> int:

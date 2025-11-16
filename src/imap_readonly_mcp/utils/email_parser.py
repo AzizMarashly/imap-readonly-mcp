@@ -203,7 +203,10 @@ def create_summary_from_message(
         "reply_to": parse_address_list(message.get_all("Reply-To")),
         "date": parse_message_date(message.get("Date")),
         "snippet": summary_snippet,
-        "has_attachments": any(part.get_content_disposition() == "attachment" for part in message.walk()),
+        # Consider both attachment and inline dispositions as attachments for UX purposes.
+        "has_attachments": any(
+            (part.get_content_disposition() in {"attachment", "inline"}) for part in message.walk()
+        ),
         "flags": flags or MessageFlags(),
         "resource_uri": f"mail://{folder_token}/{uid}",
         "raw_resource_uri": f"mail+raw://{folder_token}/{uid}",

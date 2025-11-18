@@ -313,6 +313,22 @@ def create_server(settings: MailSettings) -> FastMCP:
             if include_flags["headers"]:
                 headers_value = detail.headers
 
+        has_attachments_value: bool | None = None
+        if detail and getattr(detail, "attachments", None) is not None:
+            try:
+                has_attachments_value = bool(detail.attachments)
+            except Exception:
+                has_attachments_value = getattr(detail, "has_attachments", None)
+        if has_attachments_value is None:
+            has_attachments_value = getattr(summary, "has_attachments", False)
+
+        is_read_value = getattr(summary.flags, "seen", False)
+        if detail and getattr(detail, "flags", None) is not None:
+            try:
+                is_read_value = bool(detail.flags.seen)
+            except Exception:
+                pass
+
         data: dict[str, Any] = {
             "id": summary.resource_uri,
             "thread_id": getattr(summary, "thread_id", None) or summary.uid,
@@ -328,9 +344,9 @@ def create_server(settings: MailSettings) -> FastMCP:
             "bcc": [_address_to_contact(addr) for addr in summary.bcc],
             "reply_to": [_address_to_contact(addr) for addr in summary.reply_to],
             "subject": summary.subject,
-            "is_read": summary.flags.seen,
+            "is_read": is_read_value,
             "snippet": snippet_value,
-            "has_attachments": summary.has_attachments,
+            "has_attachments": has_attachments_value,
             "flags": summary.flags.model_dump(),
             "attachments": attachments if attachments_mode != "none" else [],
             "thread": [] if expand_thread else None,

@@ -158,6 +158,10 @@ class MailAttachment(BaseModel):
         default=None,
         description="Base64 encoded bytes when inline payloads are requested.",
     )
+    data_text: str | None = Field(
+        default=None,
+        description="Decoded text content when the attachment is textual (e.g., text/*, JSON, XML).",
+    )
     inline_bytes: int | None = Field(
         default=None,
         description="Number of bytes included inline (useful when truncated).",
@@ -352,9 +356,9 @@ class MailDownloadAttachmentInput(BaseModel):
         description="Message identifier taken from the `id` field returned by mail_fetch.",
         examples=["mail://SU5CT1g=/12345"],
     )
-    attachment_id: str | int = Field(
-        description="Attachment identifier (provider ID or numeric index for legacy protocols).",
-        examples=["att-001", 0],
+    attachment_id: str = Field(
+        description="Attachment identifier. Pass provider ID or a numeric index as a string (e.g., '0').",
+        examples=["att-001", "0"],
     )
 
 

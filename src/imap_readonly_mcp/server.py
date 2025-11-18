@@ -668,7 +668,7 @@ def create_server(settings: MailSettings) -> FastMCP:
     async def mail_download_attachment(
         message_id: Annotated[str, Field(description="Message identifier from mail_fetch (`id` field).")],
         attachment_id: Annotated[
-            str | int, Field(description="Attachment identifier (string id or positional index).")
+            str, Field(description="Attachment identifier (provider id or numeric index as a string).")
         ],
     ) -> MailDownloadAttachmentResult:
         payload = MailDownloadAttachmentInput(message_id=message_id, attachment_id=attachment_id)
@@ -781,20 +781,46 @@ def _to_dict(model: Any) -> Any:
 
 
 def _serialise_attachment(attachment: AttachmentContent) -> MailAttachment:
-    encoded = base64.b64encode(attachment.data).decode("ascii")
     download_url: str | None = None
     if attachment.download_url:
         download_url = str(attachment.download_url)
     elif attachment.metadata.resource_uri:
         download_url = attachment.metadata.resource_uri
+
+    mime = attachment.mime_type or "application/octet-stream"
+    raw = attachment.data
+
+    def _is_textual(m: str) -> bool:
+        m_lower = m.lower()
+        if m_lower.startswith("text/"):
+            return True
+        textual_markers = ("json", "+json", "xml", "+xml", "csv", "yaml", "yml", "javascript")
+        return any(tok in m_lower for tok in textual_markers)
+
+    if _is_textual(mime):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("utf-8", errors="replace")
+        return MailAttachment(
+            id=attachment.metadata.attachment_id,
+            filename=attachment.file_name or attachment.metadata.filename,
+            size=attachment.metadata.size,
+            mime=mime,
+            download_url=download_url,
+            data_text=text,
+            inline_bytes=len(raw),
+        )
+
+    encoded = base64.b64encode(raw).decode("ascii")
     return MailAttachment(
         id=attachment.metadata.attachment_id,
         filename=attachment.file_name or attachment.metadata.filename,
         size=attachment.metadata.size,
-        mime=attachment.mime_type,
+        mime=mime,
         download_url=download_url,
         data_base64=encoded,
-        inline_bytes=len(attachment.data),
+        inline_bytes=len(raw),
     )
 
 

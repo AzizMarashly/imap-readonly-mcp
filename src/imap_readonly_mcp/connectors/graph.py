@@ -129,17 +129,27 @@ class GraphReadOnlyConnector(ReadOnlyMailConnector):
             charset="utf-8",
         )
 
-        attachments = []
-        for attachment in payload.get("attachments", []):
-            attachments.append(
-                AttachmentMetadata(
-                    attachment_id=attachment["id"],
-                    filename=attachment.get("name") or "attachment",
-                    content_type=attachment.get("contentType", "application/octet-stream"),
-                    size=attachment.get("size"),
-                    resource_uri=f"mail+attachment://{summary.folder_token}/{summary.uid}/{attachment['id']}",
-                )
-            )
+        # Ensure we enumerate all attachments using the attachments endpoint (handles paging)
+        attachments: list[AttachmentMetadata] = []
+        if payload.get("hasAttachments"):
+            att_url = f"{GRAPH_API_ROOT}/{self._resource_path}/messages/{uid}/attachments?$top=200"
+            while att_url:
+                att_resp = self._session.get(att_url, headers=headers)
+                att_resp.raise_for_status()
+                att_data = att_resp.json()
+                for att in att_data.get("value", []):
+                    att_id = att.get("id")
+                    attachments.append(
+                        AttachmentMetadata(
+                            attachment_id=att_id,
+                            filename=att.get("name") or "attachment",
+                            content_type=att.get("contentType", "application/octet-stream"),
+                            size=att.get("size"),
+                            resource_uri=f"mail+attachment://{summary.folder_token}/{summary.uid}/{att_id}",
+                        )
+                    )
+                next_link = att_data.get("@odata.nextLink")
+                att_url = str(next_link) if next_link else ""
 
         headers_map: dict[str, list[str]] = {}
         for header in payload.get("internetMessageHeaders", []):

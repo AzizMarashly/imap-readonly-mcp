@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
 import anyio
+from charset_normalizer import from_bytes
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.logging import get_logger
 from pydantic import Field
@@ -236,23 +237,62 @@ def create_server(settings: MailSettings) -> FastMCP:
         if attachments_mode == "none" or not detail:
             return []
         results: list[MailAttachment] = []
-        for index, metadata in enumerate(detail.attachments):
+        attachments_source = list(detail.attachments or [])
+
+        async def _maybe_rebuild_attachments() -> list[Any] | None:
+            """Rebuild attachment metadata from raw MIME when connector under-reports."""
+            should_rebuild = len(attachments_source) == 0 or (
+                len(attachments_source) == 1 and getattr(detail, "has_attachments", False)
+            )
+            if not should_rebuild:
+                return None
+
+            raw_bytes: bytes | None = None
+            raw_source = getattr(detail, "raw_source", None)
+            if isinstance(raw_source, str) and raw_source:
+                raw_bytes = raw_source.encode("utf-8", errors="replace")
+            if raw_bytes is None:
+                try:
+                    raw_bytes = await _run(service.fetch_raw_message, detail.folder_token, detail.uid)
+                except Exception:
+                    return None
+            try:
+                from .utils.email_parser import extract_attachments, parse_rfc822_message
+
+                msg = parse_rfc822_message(raw_bytes)
+                rebuilt = extract_attachments(
+                    msg,
+                    folder_path=getattr(detail, "folder_path", ""),
+                    uid=getattr(detail, "uid", ""),
+                )
+                return rebuilt
+            except Exception:
+                return None
+
+        rebuilt = await _maybe_rebuild_attachments()
+        if rebuilt and len(rebuilt) > len(attachments_source):
+            attachments_source = rebuilt
+
+        for index, metadata in enumerate(attachments_source):
             entry = MailAttachment(
-                id=(metadata.attachment_id or str(index)),
-                filename=metadata.filename,
-                size=metadata.size,
-                mime=metadata.content_type,
-                download_url=metadata.resource_uri,
+                id=(getattr(metadata, "attachment_id", None) or metadata.get("attachment_id") or str(index)),
+                filename=(getattr(metadata, "filename", None) or metadata.get("filename")),
+                size=(getattr(metadata, "size", None) or metadata.get("size")),
+                mime=(getattr(metadata, "content_type", None) or metadata.get("content_type")),
+                download_url=(getattr(metadata, "resource_uri", None) or metadata.get("resource_uri")),
             )
             if attachments_mode == "inline":
                 identifier: int | str
-                if metadata.attachment_id is None:
+                attachment_id_value = getattr(metadata, "attachment_id", None) or metadata.get(
+                    "attachment_id"
+                )
+                if attachment_id_value is None:
                     identifier = index
                 else:
-                    identifier = metadata.attachment_id
+                    identifier = attachment_id_value
                 if isinstance(identifier, str) and identifier.isdigit():
                     identifier = int(identifier)
-                size_hint = metadata.size
+                size_hint = getattr(metadata, "size", None) or metadata.get("size")
                 include_payload = size_hint is None or size_hint <= INLINE_ATTACHMENT_MAX_BYTES
                 if include_payload:
                     try:
@@ -265,7 +305,10 @@ def create_server(settings: MailSettings) -> FastMCP:
                         data = content.data
                         entry.inline_bytes = len(data)
                         if len(data) <= INLINE_ATTACHMENT_MAX_BYTES:
-                            entry.data_base64 = base64.b64encode(data).decode("ascii")
+                            # Reuse serialiser to set either data_text or data_base64 based on mime
+                            serialised = _serialise_attachment(content)
+                            entry.data_base64 = serialised.data_base64
+                            entry.data_text = serialised.data_text
                         else:
                             entry.inline_truncated = True
                     except AttachmentNotFoundError as exc:
@@ -757,6 +800,66 @@ def create_server(settings: MailSettings) -> FastMCP:
         )
         return attachment.data
 
+    @mcp.tool(
+        name="mail_debug_list_parts",
+        description=(
+            "Diagnostic: inspect MIME parts for a message to troubleshoot attachment detection.\n"
+            "Returns all parts with index, content_type, disposition, filename, and size.\n"
+            "Note: uses current server rules to compute which indices are considered attachments."
+        ),
+        structured_output=True,
+    )
+    async def mail_debug_list_parts(
+        message_id: Annotated[str, Field(description="Message identifier (mail://{folder_token}/{uid})")],
+    ) -> dict[str, Any]:
+        folder_token, uid = _parse_message_id(message_id)
+        raw = await _run(service.fetch_raw_message, folder_token, uid)
+        from .utils.email_parser import parse_rfc822_message
+
+        msg = parse_rfc822_message(raw)
+        parts: list[dict[str, Any]] = []
+        attach_indices: list[int] = []
+        current_attach_index = -1
+        for i, part in enumerate(msg.walk()):
+            if part.is_multipart():
+                parts.append(
+                    {
+                        "walk_index": i,
+                        "multipart": True,
+                        "content_type": part.get_content_type(),
+                    }
+                )
+                continue
+            disp = part.get_content_disposition()
+            ctype = part.get_content_type()
+            fname = part.get_filename()
+            payload = part.get_payload(decode=True) or b""
+            size = len(payload)
+
+            # Mirror attachment heuristics used by extractor
+            is_non_body = ctype not in {"text/plain", "text/html"}
+            considered_attachment = bool((disp in {"attachment", "inline"}) or fname or is_non_body)
+            if considered_attachment:
+                current_attach_index += 1
+                attach_indices.append(current_attach_index)
+
+            parts.append(
+                {
+                    "walk_index": i,
+                    "content_type": ctype,
+                    "disposition": disp,
+                    "filename": fname,
+                    "size": size,
+                    "considered_attachment": considered_attachment,
+                    "attachment_index_if_considered": current_attach_index if considered_attachment else None,
+                }
+            )
+
+        return {
+            "message_id": message_id,
+            "parts": parts,
+        }
+
     @mcp.resource(
         "mail://folders",
         description="JSON list of folders available in the mailbox.",
@@ -787,28 +890,62 @@ def _serialise_attachment(attachment: AttachmentContent) -> MailAttachment:
     elif attachment.metadata.resource_uri:
         download_url = attachment.metadata.resource_uri
 
-    mime = attachment.mime_type or "application/octet-stream"
+    mime = attachment.mime_type or attachment.metadata.content_type or "application/octet-stream"
     raw = attachment.data
 
-    def _is_textual(m: str) -> bool:
+    def _is_textual_mime(m: str) -> bool:
         m_lower = m.lower()
         if m_lower.startswith("text/"):
             return True
         textual_markers = ("json", "+json", "xml", "+xml", "csv", "yaml", "yml", "javascript")
         return any(tok in m_lower for tok in textual_markers)
 
-    if _is_textual(mime):
+    def _looks_binary(data: bytes) -> bool:
+        if not data:
+            return False
+        if b"\x00" in data:
+            return True
+        control_bytes = sum(1 for b in data if b < 9 or (13 < b < 32 and b not in (9, 10, 13)))
+        return (control_bytes / max(len(data), 1)) > 0.3
+
+    def _decode_textual(data: bytes, mime_hint: str) -> str | None:
+        mime_textual = _is_textual_mime(mime_hint)
+        if _looks_binary(data) and not mime_textual:
+            return None
+        detection = None
         try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            text = raw.decode("utf-8", errors="replace")
+            detection = from_bytes(data).best()
+        except Exception:
+            detection = None
+        candidate_encodings: list[tuple[str, str]] = [("utf-8", "strict")]
+        detected_encoding: tuple[str, str] | None = None
+        if detection and detection.encoding and detection.encoding.lower() != "ascii":
+            detected_encoding = (detection.encoding, "replace")
+        if mime_textual:
+            if detected_encoding:
+                candidate_encodings.append(detected_encoding)
+            candidate_encodings.append(("latin-1", "replace"))
+        else:
+            candidate_encodings.append(("latin-1", "replace"))
+            if detected_encoding:
+                candidate_encodings.append(detected_encoding)
+        if mime_textual or not _looks_binary(data):
+            for encoding, error_mode in candidate_encodings:
+                try:
+                    return data.decode(encoding, errors=error_mode)
+                except Exception:
+                    continue
+        return None
+
+    decoded_text = _decode_textual(raw, mime)
+    if decoded_text is not None:
         return MailAttachment(
             id=attachment.metadata.attachment_id,
             filename=attachment.file_name or attachment.metadata.filename,
             size=attachment.metadata.size,
             mime=mime,
             download_url=download_url,
-            data_text=text,
+            data_text=decoded_text,
             inline_bytes=len(raw),
         )
 

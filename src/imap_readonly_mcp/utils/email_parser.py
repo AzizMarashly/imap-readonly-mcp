@@ -98,6 +98,15 @@ def _extract_text_from_part(part: Message) -> tuple[str | None, str | None]:
     return data.decode("utf-8", errors="replace"), charset
 
 
+def _is_attachment_part(part: Message) -> bool:
+    """Determine whether a MIME part should be treated as an attachment."""
+    disposition = part.get_content_disposition()
+    content_type = part.get_content_type()
+    has_name = bool(part.get_filename())
+    is_non_body_payload = content_type not in {"text/plain", "text/html"}
+    return bool((disposition in {"attachment", "inline"}) or has_name or is_non_body_payload)
+
+
 def extract_body(message: Message) -> MessageBody:
     """Extract plain text and HTML bodies from a message."""
     if message.is_multipart():
@@ -136,8 +145,9 @@ def extract_attachments(
     folder_token = encode_folder_path(folder_path)
     index = 0
     for part in message.walk():
-        disposition = part.get_content_disposition()
-        if disposition not in {"attachment", "inline"}:
+        if part.is_multipart():
+            continue
+        if not _is_attachment_part(part):
             continue
         filename = decode_mime_words(part.get_filename()) or f"attachment-{index}"
         attachment_id = part.get("Content-ID") or f"{uid}-{index}"
@@ -158,8 +168,9 @@ def get_attachment_payload(message: Message, attachment_index: int) -> tuple[Att
     """Return metadata and payload bytes for a given attachment index."""
     current_index = -1
     for part in message.walk():
-        disposition = part.get_content_disposition()
-        if disposition not in {"attachment", "inline"}:
+        if part.is_multipart():
+            continue
+        if not _is_attachment_part(part):
             continue
         current_index += 1
         if current_index != attachment_index:
@@ -205,7 +216,7 @@ def create_summary_from_message(
         "snippet": summary_snippet,
         # Consider both attachment and inline dispositions as attachments for UX purposes.
         "has_attachments": any(
-            (part.get_content_disposition() in {"attachment", "inline"}) for part in message.walk()
+            _is_attachment_part(part) for part in message.walk() if not part.is_multipart()
         ),
         "flags": flags or MessageFlags(),
         "resource_uri": f"mail://{folder_token}/{uid}",
